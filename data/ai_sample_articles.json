@@ -1,0 +1,37 @@
+[
+  {
+    "source": "AI Platform Watch",
+    "title": "OpenAI previews new agent runtime for enterprise workflows",
+    "url": "https://example.com/openai-agent-runtime",
+    "published_at": "2026-05-03T12:00:00Z",
+    "body": "OpenAI previewed a new agent runtime aimed at enterprise workflows, adding tool permissions, memory, eval hooks, and deployment controls. Analysts said the move could reshape how companies build production AI assistants."
+  },
+  {
+    "source": "Builder Notes",
+    "title": "Anthropic customers report stronger adoption of tool-using agents",
+    "url": "https://example.com/anthropic-tool-agents",
+    "published_at": "2026-05-03T10:30:00Z",
+    "body": "Several enterprise software teams reported stronger adoption of Claude-powered agents after adding scoped tools, review checkpoints, and explicit memory. The pattern suggests agent reliability is improving when systems constrain actions."
+  },
+  {
+    "source": "AI Infrastructure Daily",
+    "title": "NVIDIA cloud partners warn that inference demand is outpacing GPU capacity",
+    "url": "https://example.com/nvidia-inference-capacity",
+    "published_at": "2026-05-02T18:00:00Z",
+    "body": "NVIDIA cloud partners warned that inference demand from AI applications is growing faster than expected. Startups building agentic workflows are reporting higher latency and increased GPU reservation costs."
+  },
+  {
+    "source": "Policy Lens",
+    "title": "EU AI Act compliance teams focus on model evaluation records",
+    "url": "https://example.com/eu-ai-act-evals",
+    "published_at": "2026-05-02T08:45:00Z",
+    "body": "Compliance teams preparing for EU AI Act obligations are focusing on model evaluation records, incident reporting, and audit trails. Enterprise buyers are asking vendors to document safety testing before procurement."
+  },
+  {
+    "source": "Startup Radar",
+    "title": "AI coding assistant startup raises Series A for local developer agents",
+    "url": "https://example.com/local-developer-agents-series-a",
+    "published_at": "2026-05-01T15:20:00Z",
+    "body": "An AI coding assistant startup raised a Series A to build local developer agents that can read repositories, run tests, and prepare pull requests. Investors said demand is shifting from chat interfaces to autonomous task completion."
+  }
+]

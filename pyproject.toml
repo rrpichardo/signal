@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "signal-stream-agentic"
+version = "0.1.0"
+description = "Local-first agentic strategic intelligence prototype for Signal Stream."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+signal-stream = "signal_stream.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["signal_stream*"]

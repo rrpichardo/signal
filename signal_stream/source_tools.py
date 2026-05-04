@@ -1,0 +1,315 @@
+from __future__ import annotations
+
+from pathlib import Path
+import json
+import re
+import urllib.parse
+import xml.etree.ElementTree as ET
+from typing import Any
+from urllib import error, request
+
+from .llm import OllamaClient
+from .models import Article, SourceConfig
+from .text import clean_html, normalize_space
+
+
+USER_AGENT = "SignalStreamAgentic/0.1"
+YOUTUBE_VIDEO_RE = re.compile(r"(?:video:videoId|yt:videoId)$")
+SCOUT_ENRICH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "relevance_label": {"type": "string"},
+                    "topic": {"type": "string"},
+                    "signal_type": {"type": "string"},
+                    "usefulness": {"type": "string"},
+                    "scout_note": {"type": "string"},
+                },
+                "required": ["id", "relevance_label", "topic", "signal_type", "usefulness", "scout_note"],
+            },
+        }
+    },
+    "required": ["items"],
+}
+
+
+def fetch_source(source: SourceConfig) -> dict[str, Any]:
+    """Fetch one source and return a safe JSON result.
+
+    Plain English: this is Scout's main tool. It tries a source, catches
+    failures, and reports what happened instead of crashing the whole run.
+    """
+
+    try:
+        if source.kind in {"sample", "json"}:
+            articles = _load_json_source(source)
+        elif source.kind in {"rss", "atom"}:
+            articles = _load_feed_source(source)
+        elif source.kind == "youtube":
+            articles = _load_youtube_source(source)
+        elif source.kind == "report":
+            return {
+                "source": source.name,
+                "status": "skipped",
+                "articles": [],
+                "error": "Report/on-demand source; skipped during normal agent run.",
+                "confidence": 0.8,
+            }
+        else:
+            return {
+                "source": source.name,
+                "status": "error",
+                "articles": [],
+                "error": f"Unsupported source kind: {source.kind}",
+                "confidence": 0.0,
+            }
+    except Exception as exc:  # noqa: BLE001 - source failures should be data, not run-ending exceptions.
+        return {
+            "source": source.name,
+            "status": "error",
+            "articles": [],
+            "error": str(exc),
+            "confidence": 0.0,
+        }
+
+    return {
+        "source": source.name,
+        "status": "ok",
+        "articles": [_article_json(article) for article in articles],
+        "error": "",
+        "confidence": 0.9 if articles else 0.25,
+    }
+
+
+def fetch_context(query: str, articles: list[dict[str, Any]], limit: int = 5) -> dict[str, Any]:
+    """Find already-collected articles related to a topic."""
+
+    words = {word.lower() for word in query.split() if len(word) > 3}
+    ranked = []
+    for article in articles:
+        text = f"{article.get('title', '')} {article.get('body', '')}".lower()
+        overlap = sum(1 for word in words if word in text)
+        if overlap:
+            item = dict(article)
+            item["context_overlap"] = overlap
+            ranked.append(item)
+    ranked.sort(key=lambda item: item["context_overlap"], reverse=True)
+    return {
+        "query": query,
+        "articles": ranked[:limit],
+        "status": "ok",
+        "confidence": 0.65 if ranked else 0.2,
+    }
+
+
+def enrich_articles_with_model(
+    llm: OllamaClient,
+    scout_prompt: str,
+    articles: list[dict[str, Any]],
+    *,
+    max_items: int = 12,
+    relevance_policy: str = "soft_keep",
+    scout_note_enabled: bool = True,
+) -> list[dict[str, Any]]:
+    """Give Scout a lightweight model pass when hybrid/model mode is enabled.
+
+    Plain English: Scout still uses code to fetch articles. The model only adds
+    labels that help later steps understand what each article seems to be about.
+    """
+
+    if not articles or not llm.available():
+        return articles
+
+    sample = [
+        {
+            "id": article.get("id", ""),
+            "title": article.get("title", ""),
+            "source": article.get("source", ""),
+            "body": str(article.get("body", ""))[:900],
+        }
+        for article in articles[:max_items]
+    ]
+    user = json.dumps(
+        {
+            "task": "enrich_fetched_articles",
+            "articles": sample,
+            "fields": ["relevance_label", "topic", "signal_type", "usefulness", "scout_note"],
+            "relevance_labels": ["keep", "borderline", "drop"],
+            "relevance_policy": relevance_policy,
+        },
+        sort_keys=True,
+    )
+    raw = llm.chat_json(scout_prompt, user, SCOUT_ENRICH_SCHEMA)
+    if not raw:
+        return articles
+
+    enriched = {item.get("id"): item for item in raw.get("items", []) if item.get("id")}
+    merged = []
+    for article in articles:
+        item = dict(article)
+        extra = enriched.get(item.get("id"))
+        if extra:
+            raw_data = dict(item.get("raw") or {})
+            raw_data["scout_relevance_label"] = _clean_relevance(extra.get("relevance_label", "borderline"))
+            raw_data["scout_topic"] = extra.get("topic", "")
+            raw_data["scout_signal_type"] = extra.get("signal_type", "")
+            raw_data["scout_usefulness"] = extra.get("usefulness", "")
+            raw_data["scout_note"] = extra.get("scout_note", "") if scout_note_enabled else ""
+            item["raw"] = raw_data
+        if relevance_policy == "hard_drop" and dict(item.get("raw") or {}).get("scout_relevance_label") == "drop":
+            continue
+        merged.append(item)
+    return merged
+
+
+def _load_json_source(source: SourceConfig) -> list[Article]:
+    if not source.path:
+        return []
+    data = json.loads(Path(source.path).read_text(encoding="utf-8"))
+    return [
+        Article.from_fields(
+            source=item.get("source") or source.name,
+            title=item.get("title", ""),
+            url=item.get("url", ""),
+            published_at=item.get("published_at", ""),
+            body=item.get("body", ""),
+            raw=item,
+        )
+        for item in data[: source.limit]
+    ]
+
+
+def _load_feed_source(source: SourceConfig) -> list[Article]:
+    if not source.url:
+        return []
+    root = _fetch_xml(source.url)
+    entries = _feed_entries(root)[: source.limit]
+    return [_article_from_entry(source, entry) for entry in entries]
+
+
+def _load_youtube_source(source: SourceConfig) -> list[Article]:
+    feed_url = source.url or f"https://www.youtube.com/feeds/videos.xml?channel_id={source.channel_id}"
+    root = _fetch_xml(feed_url)
+    entries = _feed_entries(root)[: source.limit]
+    articles = []
+    for entry in entries:
+        title = _child_text(entry, "title")
+        video_id = _youtube_video_id(entry)
+        url = f"https://www.youtube.com/watch?v={video_id}" if video_id else _entry_link(entry)
+        published_at = _child_text(entry, "published", "updated")
+        transcript = _fetch_youtube_transcript(video_id) if video_id else ""
+        body = transcript or clean_html(_child_text(entry, "description", "summary"))
+        raw = {"video_id": video_id, "transcript_available": bool(transcript), "source_type": "youtube"}
+        articles.append(Article.from_fields(source=source.name, title=title, url=url, published_at=published_at, body=body, raw=raw))
+    return articles
+
+
+def _fetch_xml(url: str) -> ET.Element:
+    req = request.Request(url, headers={"User-Agent": USER_AGENT})
+    with request.urlopen(req, timeout=25) as response:
+        payload = response.read(3_000_000)
+    return ET.fromstring(payload)
+
+
+def _fetch_youtube_transcript(video_id: str | None) -> str:
+    if not video_id:
+        return ""
+    params = urllib.parse.urlencode({"v": video_id, "fmt": "srv3", "lang": "en"})
+    url = f"https://video.google.com/timedtext?{params}"
+    try:
+        root = _fetch_xml(url)
+    except (error.URLError, ET.ParseError, TimeoutError, ValueError):
+        return ""
+    chunks = []
+    for text in root.iter():
+        if _local_name(text.tag) == "text":
+            chunks.append("".join(text.itertext()))
+    return normalize_space(clean_html(" ".join(chunks)))
+
+
+def _feed_entries(root: ET.Element) -> list[ET.Element]:
+    local = _local_name(root.tag)
+    if local == "feed":
+        return [child for child in list(root) if _local_name(child.tag) == "entry"]
+    channel = next((child for child in root.iter() if _local_name(child.tag) == "channel"), root)
+    return [child for child in list(channel) if _local_name(child.tag) == "item"]
+
+
+def _article_from_entry(source: SourceConfig, entry: ET.Element) -> Article:
+    title = _child_text(entry, "title")
+    url = _entry_link(entry)
+    published_at = _child_text(entry, "published", "updated", "pubDate", "date")
+    body = clean_html(_child_text(entry, "description", "summary", "encoded", "content"))
+    return Article.from_fields(source=source.name, title=title, url=url, published_at=published_at, body=body, raw={"feed": source.name, "image_url": _entry_image(entry)})
+
+
+def _local_name(tag: str) -> str:
+    return tag.split("}", 1)[-1]
+
+
+def _child_text(entry: ET.Element, *names: str) -> str:
+    wanted = {name.lower() for name in names}
+    for child in list(entry):
+        local = _local_name(child.tag).lower()
+        if local in wanted or local.split(":")[-1] in wanted:
+            return "".join(child.itertext()).strip()
+    return ""
+
+
+def _entry_link(entry: ET.Element) -> str:
+    for child in list(entry):
+        if _local_name(child.tag).lower() != "link":
+            continue
+        href = child.attrib.get("href")
+        if href:
+            return href
+        if child.text:
+            return child.text.strip()
+    return ""
+
+
+def _entry_image(entry: ET.Element) -> str:
+    """Best-effort article image extraction from common RSS/Atom fields."""
+
+    for child in entry.iter():
+        local = _local_name(child.tag).lower()
+        url = child.attrib.get("url") or child.attrib.get("href")
+        if url and (local in {"thumbnail", "content", "enclosure"} or "image" in child.attrib.get("type", "")):
+            return url.strip()
+    for child in entry.iter():
+        local = _local_name(child.tag).lower()
+        if local in {"image", "logo"} and child.text:
+            return child.text.strip()
+    return ""
+
+
+def _clean_relevance(value: object) -> str:
+    label = str(value or "").strip().lower().replace(" ", "_")
+    return label if label in {"keep", "borderline", "drop"} else "borderline"
+
+
+def _youtube_video_id(entry: ET.Element) -> str:
+    for child in entry.iter():
+        if YOUTUBE_VIDEO_RE.search(child.tag):
+            return (child.text or "").strip()
+    link = _entry_link(entry)
+    parsed = urllib.parse.urlparse(link)
+    return urllib.parse.parse_qs(parsed.query).get("v", [""])[0]
+
+
+def _article_json(article: Article) -> dict[str, Any]:
+    return {
+        "id": article.id,
+        "source": article.source,
+        "title": article.title,
+        "url": article.url,
+        "published_at": article.published_at,
+        "body": article.body,
+        "fetched_at": article.fetched_at,
+        "raw": article.raw,
+    }

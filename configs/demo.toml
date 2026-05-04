@@ -1,0 +1,53 @@
+[profile]
+name = "Signal Stream Demo"
+organization = "Robert Advisory"
+audience = "Art auction advisor and strategy team"
+mission = "Catch market, regulatory, competitor, and provenance signals before clients are exposed."
+competitors = ["Sotheby's", "Christie's", "Phillips", "Heritage Auctions", "Bonhams"]
+markets = ["art auction", "fine art", "private sales", "luxury", "collectibles", "wealth management", "Latin America", "Asia"]
+
+[storage]
+path = "../.signal_stream/signal_stream.db"
+
+[delivery]
+output_dir = "../outputs"
+digest_limit = 10
+critical_threshold = 82
+similarity_threshold = 0.52
+
+[ollama]
+enabled = false
+model = "qwen3:1.7b"
+host = "http://localhost:11434"
+timeout_seconds = 45
+
+[[priorities]]
+name = "Protect clients from burned assets"
+description = "Warn advisors when assets may be exposed to fraud, provenance, sanctions, litigation, or reputational risk."
+weight = 2.4
+keywords = ["fraud", "forgery", "provenance", "lawsuit", "sanctions", "stolen", "restitution", "withdrawn", "AML", "anti-money laundering", "investigation", "risk"]
+
+[[priorities]]
+name = "Monitor competitor moves"
+description = "Track changes by major auction houses that may shift client expectations or deal flow."
+weight = 1.6
+keywords = ["launches", "expands", "private sales", "guarantee", "acquires", "partnership", "fees", "commission", "digital platform", "client advisory"]
+
+[[priorities]]
+name = "Find market entry opportunities"
+description = "Surface geography, category, and buyer demand shifts that could create advisory opportunities."
+weight = 1.4
+keywords = ["demand", "growth", "record sales", "new collectors", "market entry", "Latin America", "Asia", "wealth", "family office", "estate"]
+
+[[priorities]]
+name = "Regulatory and compliance exposure"
+description = "Watch for changes that affect high-value art transactions, reporting, and cross-border movement."
+weight = 2.0
+keywords = ["regulation", "regulatory", "compliance", "customs", "tariff", "beneficial ownership", "reporting", "seizure", "cross-border", "tax"]
+
+[[sources]]
+name = "Signal Stream Sample Wire"
+kind = "sample"
+path = "../data/sample_articles.json"
+limit = 50
+enabled = true

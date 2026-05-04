@@ -1,0 +1,257 @@
+[profile]
+name = "Signal Stream AI/Tech"
+organization = "Signal Stream"
+audience = "AI/tech strategy reader"
+mission = "Surface the highest-signal AI and technology industry developments, explain why they matter, and avoid repeating yesterday's news."
+competitors = ["OpenAI", "Anthropic", "Google", "Meta", "Microsoft", "NVIDIA", "Apple", "Amazon", "xAI", "Mistral", "Perplexity"]
+markets = ["AI", "generative AI", "LLM", "agents", "developer tools", "chips", "cloud", "enterprise software", "startups", "venture capital"]
+
+[storage]
+path = "../.signal_stream/signal_stream.db"
+
+[delivery]
+output_dir = "../outputs"
+digest_limit = 12
+critical_threshold = 86
+similarity_threshold = 0.48
+
+[agent]
+max_iterations = 6
+min_signals = 8
+dashboard_port = 8765
+worker_timeout_seconds = 120
+max_article_age_days = 14
+brain_file = "agent_brain.toml"
+# Fallback modes only. The dashboard edits the real defaults in agent_brain.toml.
+scout_mode = "hybrid"
+analyst_mode = "hybrid"
+require_ollama = true
+allow_mock_brain = false
+
+[ollama]
+enabled = true
+model = "qwen3:1.7b"
+host = "http://localhost:11434"
+timeout_seconds = 60
+
+[[priorities]]
+name = "AI platform shifts"
+description = "Major model, platform, pricing, developer ecosystem, or product moves."
+weight = 2.2
+keywords = ["OpenAI", "Anthropic", "Gemini", "Claude", "ChatGPT", "agents", "API", "model", "pricing", "platform", "developer", "enterprise"]
+
+[[priorities]]
+name = "Startup and investment signals"
+description = "Funding, acquisitions, launches, and category creation in AI and tech."
+weight = 1.6
+keywords = ["funding", "startup", "acquisition", "acquires", "launch", "seed", "Series A", "venture", "valuation", "YC"]
+
+[[priorities]]
+name = "Infrastructure and chips"
+description = "Compute, GPU, cloud, data center, and AI infrastructure constraints or breakthroughs."
+weight = 1.7
+keywords = ["NVIDIA", "GPU", "chip", "compute", "cloud", "infrastructure", "data center", "latency", "inference", "training"]
+
+[[priorities]]
+name = "Regulation and risk"
+description = "Policy, safety, copyright, privacy, and enterprise adoption risks."
+weight = 1.8
+keywords = ["regulation", "policy", "copyright", "lawsuit", "privacy", "security", "safety", "EU AI Act", "compliance", "risk"]
+
+[[priorities]]
+name = "Builder tactics"
+description = "Practical technical essays and operator lessons worth applying."
+weight = 1.3
+keywords = ["architecture", "engineering", "prompt", "evaluation", "RAG", "fine-tuning", "product", "growth", "PM", "case study"]
+
+# Medium sources from the Claude chat.
+[[sources]]
+name = "Towards AI"
+kind = "rss"
+group = "medium"
+url = "https://pub.towardsai.net/feed"
+limit = 8
+enabled = true
+
+[[sources]]
+name = "Towards Data Science"
+kind = "rss"
+group = "medium"
+url = "https://towardsdatascience.com/feed"
+limit = 8
+enabled = true
+
+[[sources]]
+name = "Analytics Vidhya"
+kind = "rss"
+group = "medium"
+url = "https://medium.com/feed/analytics-vidhya"
+limit = 8
+enabled = true
+
+[[sources]]
+name = "Becoming Human: AI Magazine"
+kind = "rss"
+group = "medium"
+url = "https://becominghuman.ai/feed"
+limit = 8
+enabled = true
+
+[[sources]]
+name = "Codex"
+kind = "rss"
+group = "medium"
+url = "https://medium.com/feed/codex"
+limit = 8
+enabled = true
+
+[[sources]]
+name = "Generative AI"
+kind = "rss"
+group = "medium"
+url = "https://generativeai.pub/feed"
+limit = 8
+enabled = true
+
+# Substack/newsletter sources from the Claude chat.
+[[sources]]
+name = "AI Supremacy"
+kind = "rss"
+group = "substack"
+url = "https://aisupremacy.substack.com/feed"
+limit = 8
+enabled = true
+
+[[sources]]
+name = "New Economies"
+kind = "rss"
+group = "substack"
+url = "https://neweconomies.substack.com/feed"
+limit = 8
+enabled = true
+
+[[sources]]
+name = "State of AI"
+kind = "report"
+group = "on_demand"
+url = "https://www.stateof.ai/"
+limit = 1
+enabled = false
+on_demand = true
+
+[[sources]]
+name = "The Sequence"
+kind = "rss"
+group = "substack"
+url = "https://thesequence.substack.com/feed"
+limit = 8
+enabled = true
+
+[[sources]]
+name = "LLM Watch"
+kind = "rss"
+group = "substack"
+url = "https://llmwatch.substack.com/feed"
+limit = 8
+enabled = true
+
+[[sources]]
+name = "Import AI"
+kind = "rss"
+group = "substack"
+url = "https://importai.substack.com/feed"
+limit = 8
+enabled = true
+
+[[sources]]
+name = "AI Top Tools Weekly"
+kind = "rss"
+group = "substack"
+url = "https://aitoptools.substack.com/feed"
+limit = 8
+enabled = true
+
+[[sources]]
+name = "Turing Post"
+kind = "rss"
+group = "substack"
+url = "https://www.turingpost.com/feed"
+limit = 8
+enabled = true
+
+[[sources]]
+name = "Decoding AI Magazine"
+kind = "rss"
+group = "substack"
+url = "https://decodingai.substack.com/feed"
+limit = 8
+enabled = true
+
+[[sources]]
+name = "The Neural Maze"
+kind = "rss"
+group = "substack"
+url = "https://neuralmaze.substack.com/feed"
+limit = 8
+enabled = true
+
+# Standalone blogs/newsletters from the Claude chat.
+[[sources]]
+name = "The Pragmatic Engineer"
+kind = "rss"
+group = "newsletter_blog"
+url = "https://newsletter.pragmaticengineer.com/feed"
+limit = 8
+enabled = true
+
+[[sources]]
+name = "Daily Dose of Data Science"
+kind = "rss"
+group = "newsletter_blog"
+url = "https://blog.dailydoseofds.com/feed"
+limit = 8
+enabled = true
+
+[[sources]]
+name = "AI Daily Brief Newsletter"
+kind = "rss"
+group = "newsletter_blog"
+url = "https://aidailybrief.beehiiv.com/feed"
+limit = 8
+enabled = true
+
+[[sources]]
+name = "ByteByteGo Blog"
+kind = "rss"
+group = "newsletter_blog"
+url = "https://blog.bytebytego.com/feed"
+limit = 8
+enabled = true
+
+# YouTube sources from the Claude chat.
+[[sources]]
+name = "ByteByteGo YouTube"
+kind = "youtube"
+group = "youtube"
+channel_id = "UCZgt6AzoyjslHTC9dz0UoTw"
+url = "https://www.youtube.com/feeds/videos.xml?channel_id=UCZgt6AzoyjslHTC9dz0UoTw"
+limit = 3
+enabled = true
+
+[[sources]]
+name = "The AI Daily Brief YouTube"
+kind = "youtube"
+group = "youtube"
+channel_id = "UCKelCK4ZaO6HeEI1KQjqzWA"
+url = "https://www.youtube.com/feeds/videos.xml?channel_id=UCKelCK4ZaO6HeEI1KQjqzWA"
+limit = 3
+enabled = true
+
+# Offline smoke-test source.
+[[sources]]
+name = "Signal Stream AI Sample Wire"
+kind = "sample"
+group = "sample"
+path = "../data/ai_sample_articles.json"
+limit = 20
+enabled = false
