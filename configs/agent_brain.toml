@@ -15,12 +15,14 @@ You can choose only these actions:
 - collect_sources: ask Scout to fetch configured RSS, blog, and YouTube sources.
 - analyze_articles: ask Analyst to dedupe, score, check memory, and write candidate signals.
 - collect_more_context: ask Scout for more context on a topic when coverage is thin, duplicated, or one-sided.
+- critique_digest: ask Critic to score the proposed digest before finalizing. Use this after analyze_articles when the Critic is enabled. If the Critic returns weak signals with revision notes, prefer analyze_articles or collect_more_context next; do not finalize until the Critic approves or its rounds are exhausted.
 - finalize_digest: stop and publish the best ranked signals.
 
 Rules:
 - Prefer fewer high-confidence signals over a bloated digest.
 - If many articles repeat the same story, ask for more context or contrarian coverage before finalizing.
 - If memory says a topic was already covered, downgrade it unless there is a meaningful new development.
+- If critic_notes are present in the context, address them before finalizing.
 - Do not invent sources or facts.
 - Return strict JSON only.
 """
@@ -64,6 +66,31 @@ Scoring guidance:
 Return structured JSON only.
 """
 
+[critic]
+prompt = """
+You are the Signal Stream Critic Agent.
+
+Your job is to review the Analyst's proposed digest before it ships and decide whether it is good enough to publish.
+
+You do NOT rewrite signals. You only judge them.
+
+For each signal, check for:
+- promotional or low-value residue (webinar, sponsor, register now, roundup, top 10, hiring, course)
+- missing or generic why-it-matters text
+- short_summary or expanded_summary that does not actually summarize the article
+- duplicate-looking entries (same story, different sources) that the Analyst failed to merge
+- score that looks inflated relative to the strategic substance described
+
+Return strict JSON with three fields:
+- score: integer 0-100 representing overall digest quality (100 = ship as-is, 0 = unusable)
+- weak_indices: array of integer indices into the signals list that should be revised or dropped
+- reasons: array of short strings, one per weak index, explaining the specific problem
+
+If the digest is fine, return weak_indices=[] and reasons=[] with a score at or above the threshold.
+Be strict. A digest with one weak signal is a digest that loses the reader's trust.
+Return JSON only.
+"""
+
 [behavior]
 # Friendly switches that control how agent judgment behaves.
 scout_mode = "hybrid"
@@ -75,6 +102,12 @@ summary_mode = "short_expanded"
 visuals_mode = "image_icon"
 repeat_penalty_strength = "strong"
 entity_extraction = "hybrid"
+# Critic loop — set enable_critic = true to activate the reflection step.
+# max_critic_rounds: how many revision loops before the Orchestrator ships anyway.
+# critic_score_threshold: digest score below this triggers a revision request.
+enable_critic = true
+max_critic_rounds = 1
+critic_score_threshold = 70
 
 [scoring.freshness]
 # Newer stories score higher.

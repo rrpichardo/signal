@@ -30,10 +30,18 @@ Main files:
 - `signal_stream/prompts.py` holds fallback defaults if that file is missing.
 - `configs/ai_tech.toml` stores model settings, source list, priorities, and limits.
 - `signal_stream/agent_runtime.py` runs the Orchestrator loop.
-- `signal_stream/worker.py` runs Scout and Analyst as separate worker processes.
+- `signal_stream/worker.py` runs Scout, Analyst, and Critic as separate worker processes.
 - `signal_stream/source_tools.py` contains Scout's tools.
-- `signal_stream/analysis_tools.py` contains Analyst's tools.
+- `signal_stream/analysis_tools.py` contains Analyst's tools and the Critic's scoring function.
 - `signal_stream/dashboard.py` serves the local dashboard.
+
+Four-agent loop (when Critic is enabled):
+
+```
+Orchestrator → Scout (collect) → Analyst (rank) → Critic (review) → Orchestrator → finalize or revise
+```
+
+The Critic is opt-in. Set `enable_critic = true` in `configs/agent_brain.toml` to activate it.
 
 ## 2. Model Information
 
@@ -119,6 +127,7 @@ It looks at the current state and decides the next move:
 - collect sources
 - analyze articles
 - collect more context
+- critique digest (opt-in, when enable_critic = true)
 - finalize the digest
 
 The Orchestrator always makes live model calls to Ollama in the real agent run.
@@ -162,7 +171,7 @@ The Orchestrator must return JSON shaped like this:
 ```json
 {
   "thought": "Plain-English explanation of what it noticed.",
-  "action": "collect_sources | analyze_articles | collect_more_context | finalize_digest",
+  "action": "collect_sources | analyze_articles | collect_more_context | critique_digest | finalize_digest",
   "target": "Optional topic or target for more context.",
   "reason": "Why this action is the right next step.",
   "params": {}
@@ -174,6 +183,7 @@ Allowed actions:
 - `collect_sources`
 - `analyze_articles`
 - `collect_more_context`
+- `critique_digest` (only used when `enable_critic = true`)
 - `finalize_digest`
 
 ### Orchestrator tools
@@ -184,6 +194,7 @@ Instead, it can send tasks to:
 
 - Scout worker process
 - Analyst worker process
+- Critic worker process (when enabled)
 
 ## 4. Agent 2: Scout
 
@@ -334,7 +345,99 @@ Analyst returns JSON with:
 - digest Markdown
 - trace events
 
-## 6. Current Source List
+## 6. Agent 4: Critic
+
+### Purpose
+
+The Critic is the quality gate.
+
+Plain English:
+
+After the Analyst produces ranked signals, the Orchestrator can ask the Critic to score the digest before publishing. If the Critic finds weak signals, it returns revision notes and the Orchestrator loops back to fix them rather than shipping a flawed digest.
+
+The Critic is **opt-in** and off by default. Set `enable_critic = true` in `configs/agent_brain.toml` to activate it.
+
+### Current implementation status
+
+Critic runs as a separate Python worker process, the same way Scout and Analyst do.
+
+It always runs a code-based quality check. When `analyst_mode` is `hybrid` or `model`, it also asks Ollama to review the digest.
+
+### Model
+
+```text
+Current live model calls:
+- code mode: none (code checks only)
+- hybrid/model mode: optional Ollama review of the full signal list
+Worker type: separate Python process
+```
+
+### Exact prompt
+
+Runtime source file: `configs/agent_brain.toml` under `[critic]`.
+
+```text
+You are the Signal Stream Critic Agent.
+
+Your job is to review the Analyst's proposed digest before it ships and decide whether it is good enough to publish.
+
+You do NOT rewrite signals. You only judge them.
+
+For each signal, check for:
+- promotional or low-value residue (webinar, sponsor, register now, roundup, top 10, hiring, course)
+- missing or generic why-it-matters text
+- short_summary or expanded_summary that does not actually summarize the article
+- duplicate-looking entries (same story, different sources) that the Analyst failed to merge
+- score that looks inflated relative to the strategic substance described
+
+Return strict JSON with three fields:
+- score: integer 0-100 representing overall digest quality (100 = ship as-is, 0 = unusable)
+- weak_indices: array of integer indices into the signals list that should be revised or dropped
+- reasons: array of short strings, one per weak index, explaining the specific problem
+
+If the digest is fine, return weak_indices=[] and reasons=[] with a score at or above the threshold.
+Be strict. A digest with one weak signal is a digest that loses the reader's trust.
+Return JSON only.
+```
+
+### Critic tools
+
+Source file: `signal_stream/analysis_tools.py` (`score_digest_quality` function)
+
+Critic can:
+
+- detect low-value phrase residue (webinar, sponsor, roundup, etc.) in signal text
+- flag missing or too-short why-it-matters text
+- flag missing or too-short summaries
+- flag very low-scoring signals (score < 20)
+- optionally ask Ollama to review the full signal list and surface subtler problems
+
+Current Critic task type:
+
+```text
+critique_digest
+```
+
+### Critic output
+
+Critic returns JSON with:
+
+- `score` (0-100): overall digest quality
+- `weak_indices`: list of signal indices that need revision
+- `reasons`: one-line explanation per weak index
+
+### Behavior switches
+
+In `configs/agent_brain.toml`:
+
+```toml
+[behavior]
+enable_critic = false          # Set to true to activate the Critic loop
+max_critic_rounds = 1          # How many revision loops before the Orchestrator ships anyway
+critic_score_threshold = 70    # Digest score below this triggers a revision request
+```
+
+## 7. Current Source List
 
 Source config lives in `configs/ai_tech.toml`.
 
@@ -374,7 +477,7 @@ Note: State of AI is marked as on-demand and disabled in normal runs.
 - ByteByteGo YouTube
 - The AI Daily Brief YouTube
 
-## 7. Current Priorities
+## 8. Current Priorities
 
 Priorities live in `configs/ai_tech.toml`.
 
@@ -400,7 +503,7 @@ Policy, safety, copyright, privacy, and enterprise adoption risks.
 
 Practical technical essays and operator lessons worth applying.
 
-## 8. Memory
+## 9. Memory
 
 Memory is stored locally in SQLite.
 
@@ -416,7 +519,7 @@ Memory helps Signal Stream avoid pretending the same story is new every time.
 
 When a signal is saved, future runs can detect related topics and downgrade repeats.
 
-## 9. Dashboard
+## 10. Dashboard
 
 Dashboard URL:
 
@@ -437,10 +540,11 @@ The dashboard shows:
 - Orchestrator decisions
 - Scout events
 - Analyst events
+- Critic events (score, weak indices, revision notes — when Critic is enabled)
 - tool calls
 - memory
 
-## 10. Main Run Commands
+## 11. Main Run Commands
 
 Check that Ollama is available:
 
@@ -466,7 +570,7 @@ Show memory:
 python3 -m signal_stream memory show --config configs/ai_tech.toml --limit 10
 ```
 
-## 11. What To Edit
+## 12. What To Edit
 
 ### To change model
 
@@ -509,7 +613,7 @@ Edit this value in `configs/ai_tech.toml`:
 max_article_age_days = 14
 ```
 
-## 12. Important Current Limitation
+## 13. Important Current Limitation
 
 Right now:
 

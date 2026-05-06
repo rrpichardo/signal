@@ -23,10 +23,26 @@ These sections control how each agent thinks:
 - `[orchestrator]`
 - `[scout]`
 - `[analyst]`
+- `[critic]` — the reflection agent that reviews the digest before it ships (opt-in)
 
 Each one has a `prompt = """ ... """` block.
 
 You can rewrite those instructions in plain English.
+
+### 2. Critic / reflection loop
+
+The Critic is off by default. To turn it on:
+
+```toml
+[behavior]
+enable_critic = true
+max_critic_rounds = 1        # how many revision passes before the Orchestrator ships anyway
+critic_score_threshold = 70  # score below this triggers a revision request
+```
+
+When enabled, the Orchestrator will ask the Critic to score the proposed digest after the Analyst runs. If the score is below the threshold, the Critic's revision notes are passed back to the Orchestrator and it tries another pass before finalizing.
+
+To change what the Critic looks for, edit the `[critic]` prompt block.
 
 ### 2. Scoring system
 

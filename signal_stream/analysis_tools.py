@@ -497,3 +497,140 @@ def _icon_key(event_type: str) -> str:
         "market_opportunity": "market",
     }
     return mapping.get(event_type, "signal")
+
+
+# ---------------------------------------------------------------------------
+# Critic tool
+# ---------------------------------------------------------------------------
+
+CRITIC_REVIEW_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "score": {"type": "integer"},
+        "weak_indices": {"type": "array", "items": {"type": "integer"}},
+        "reasons": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["score", "weak_indices", "reasons"],
+}
+
+# Phrases that a good Analyst should have already removed; the Critic checks for
+# residue in the final ranked list as a quality gate before publishing.
+_CRITIC_LOW_VALUE_PHRASES = [
+    "webinar",
+    "register now",
+    "register for",
+    "sponsor",
+    "sponsored",
+    "roundup",
+    "top 10",
+    "top 5",
+    "we are hiring",
+    "job opening",
+    "course",
+]
+
+
+def score_digest_quality(
+    signals: list[dict[str, Any]],
+    critic_prompt: str,
+    llm: Any,
+    *,
+    critic_mode: str = "code",
+) -> dict[str, Any]:
+    """Score the proposed digest and flag weak signals for revision.
+
+    Returns a dict with keys: score (0-100), weak_indices (list[int]), reasons (list[str]).
+
+    The pure-code path checks for low-value residue, missing why-it-matters text,
+    and sub-threshold scores. The LLM path (critic_mode == 'hybrid' or 'model')
+    asks the Critic model to review the full signal list and can catch subtler
+    problems like duplicate stories that slipped through deduplication.
+    """
+
+    if not signals:
+        # Nothing to critique; report a perfect score so the runtime finalizes.
+        return {"score": 100, "weak_indices": [], "reasons": []}
+
+    weak_indices: list[int] = []
+    reasons: list[str] = []
+
+    # Code-based checks — fast, deterministic, always run.
+    for idx, signal in enumerate(signals):
+        problems: list[str] = []
+
+        # Check for low-value phrase residue in title or summaries.
+        text = " ".join([
+            str(signal.get("title", "")),
+            str(signal.get("short_summary", "")),
+            str(signal.get("why_it_matters", "")),
+        ]).lower()
+        for phrase in _CRITIC_LOW_VALUE_PHRASES:
+            if phrase in text:
+                problems.append(f"low-value phrase residue: '{phrase}'")
+                break
+
+        # Flag signals where why_it_matters is missing or obviously generic.
+        why = str(signal.get("why_it_matters", "")).strip()
+        if not why or len(why) < 20:
+            problems.append("why_it_matters is missing or too short")
+
+        # Flag signals where short_summary is absent.
+        summary = str(signal.get("short_summary", signal.get("summary", ""))).strip()
+        if not summary or len(summary) < 15:
+            problems.append("short_summary is missing or too short")
+
+        # Flag very low-scoring signals that made it past the Analyst threshold.
+        score_val = int(signal.get("score", 0))
+        if score_val < 20:
+            problems.append(f"score {score_val} is very low — may not belong in the digest")
+
+        if problems:
+            weak_indices.append(idx)
+            reasons.append("; ".join(problems))
+
+    # Compute a rough aggregate score based on fraction of clean signals.
+    clean_fraction = (len(signals) - len(weak_indices)) / len(signals)
+    # Penalise harder as more signals are weak (non-linear).
+    code_score = int(clean_fraction ** 1.5 * 100)
+
+    # LLM-based check — only in hybrid or model mode, and only when an LLM is
+    # available. The code score is returned immediately if the LLM is skipped or
+    # fails, so the runtime is never blocked by an Ollama outage.
+    if critic_mode in {"hybrid", "model"} and llm is not None:
+        try:
+            if llm.available():
+                signal_summary = json.dumps(
+                    [
+                        {
+                            "index": i,
+                            "title": s.get("title", ""),
+                            "score": s.get("score", 0),
+                            "short_summary": s.get("short_summary", s.get("summary", ""))[:200],
+                            "why_it_matters": s.get("why_it_matters", "")[:150],
+                        }
+                        for i, s in enumerate(signals)
+                    ],
+                    ensure_ascii=False,
+                )
+                raw = llm.chat_json(critic_prompt, signal_summary, CRITIC_REVIEW_SCHEMA)
+                if isinstance(raw, dict):
+                    model_score = int(raw.get("score", code_score))
+                    model_weak = [int(i) for i in raw.get("weak_indices", []) if 0 <= int(i) < len(signals)]
+                    model_reasons = [str(r) for r in raw.get("reasons", [])]
+                    # Merge model findings with code findings; deduplicate indices.
+                    seen = set(weak_indices)
+                    for i, reason in zip(model_weak, model_reasons):
+                        if i not in seen:
+                            weak_indices.append(i)
+                            reasons.append(f"[model] {reason}")
+                            seen.add(i)
+                    # In hybrid mode, blend code and model scores; model wins in model mode.
+                    if critic_mode == "model":
+                        final_score = model_score
+                    else:
+                        final_score = (code_score + model_score) // 2
+                    return {"score": final_score, "weak_indices": sorted(weak_indices), "reasons": reasons}
+        except Exception:  # noqa: BLE001 - critic failure must not abort the run.
+            pass
+
+    return {"score": code_score, "weak_indices": sorted(weak_indices), "reasons": reasons}
