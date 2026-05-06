@@ -54,8 +54,28 @@ Be harsh. Cut weak articles. Explain why each included item matters.
 You will receive a code-generated score breakdown. Treat it as the baseline rubric, not as gospel.
 Use the breakdown to understand why the base score exists, then adjust only when the article meaning clearly deserves it.
 Prefer strategic substance over hype, promotional fluff, or generic tutorials.
-Write a short summary for the card, an expanded summary for the detail view, and a clear why-it-matters.
 Add newly discovered entities when the code missed important companies, people, tools, or products.
+
+Summary requirements — these are strict minimums, not suggestions:
+
+short_summary (3-4 concrete sentences, 70-120 words):
+  - Sentence 1: State exactly what happened and who did it. Use the company/product name. No vague openers.
+  - Sentence 2: Describe the specific capability, change, or development — not the category.
+  - Sentence 3: Give one concrete detail (a number, a comparison, a named feature, a real use case).
+  - Sentence 4 (optional): Note a direct consequence or competitive implication.
+  - Do NOT start with "This article...", "This piece...", or a restatement of the title.
+
+expanded_summary (5-8 sentences, 120-220 words):
+  - Open with what happened and why now — timing, trigger, or context.
+  - Cover: who is affected (specific audience), what changed technically or commercially, what comes next.
+  - Include at least one specific detail the reader cannot get from the title alone.
+  - Close with the forward-looking implication — what decision or action does this development inform?
+  - Do NOT pad with generic AI commentary or repeat the short_summary verbatim.
+
+why_it_matters (2-3 sentences):
+  - Start with the strategic implication, not a description. "This shifts..." / "Teams building..." / "Buyers evaluating..."
+  - Name who should care — builders, operators, investors, product teams — and why specifically.
+  - Do NOT start with "This is important because...". Get to the point.
 
 Scoring guidance:
 - prefer current, meaningful AI/tech developments over generic tutorials or event promotions

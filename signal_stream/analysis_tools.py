@@ -70,8 +70,11 @@ def analyze_articles(
         event_type = _theme(draft, insights)
         memory_hits = storage.memory_matches(f"{article.title} {article.body}", limit=3)
         score, score_breakdown = _base_score_card(article, draft, memory_hits, event_type, scoring_rubric or DEFAULT_SCORING_RUBRIC, behavior)
-        short_summary = first_sentences(article.body, max_sentences=2)
-        expanded_summary = "" if behavior.get("summary_mode") == "short_only" else first_sentences(article.body, max_sentences=6, max_chars=1200)
+        # Code-path fallback summaries. In hybrid/model mode the LLM overwrites
+        # these with proper prose. The code path needs to be readable on its own
+        # so we take more sentences and avoid echoing the headline as sentence 1.
+        short_summary = _code_short_summary(article)
+        expanded_summary = "" if behavior.get("summary_mode") == "short_only" else first_sentences(article.body, max_sentences=8, max_chars=1800)
         visuals_mode = str(behavior.get("visuals_mode", "image_icon"))
         image_url = str(article.raw.get("image_url", "")) if visuals_mode == "image_icon" else ""
         icon_key = _icon_key(event_type) if visuals_mode != "none" else ""
@@ -207,13 +210,79 @@ def _theme(draft: Any, insights: list[ClusterInsight]) -> str:
     return "industry_signal"
 
 
+def _code_short_summary(article: Article) -> str:
+    """Build a code-path short summary that skips sentences that just echo the title.
+
+    Plain English: many RSS feeds repeat the headline as the first sentence of the
+    body. Taking that sentence as the summary is useless — the reader already sees
+    the title. We skip sentences with high word-overlap with the title and take the
+    next 3-4 substantive sentences instead, up to 320 characters.
+    """
+    body = normalize_space(article.body)
+    if not body:
+        return normalize_space(article.title)
+
+    # Tokenise title for overlap check (short words excluded to reduce false hits).
+    title_words = {w.lower() for w in article.title.split() if len(w) > 3}
+    sentences = [s.strip() for s in body.split(".") if s.strip()]
+    kept: list[str] = []
+    for sentence in sentences:
+        if len(kept) == 0 and title_words:
+            # Skip the first sentence if it overlaps heavily with the title.
+            sent_words = {w.lower() for w in sentence.split() if len(w) > 3}
+            overlap = len(title_words & sent_words) / max(len(title_words), 1)
+            if overlap > 0.65 and len(sentence) < len(article.title) * 1.6:
+                continue
+        kept.append(sentence)
+        if len(kept) >= 4:
+            break
+
+    if not kept:
+        # All sentences looked like title echoes — fall back to raw truncation.
+        return first_sentences(body, max_sentences=3, max_chars=320)
+
+    summary = ". ".join(kept).strip()
+    if not summary.endswith("."):
+        summary += "."
+    # Clip to 320 chars at a word boundary.
+    if len(summary) > 320:
+        summary = summary[:317].rsplit(" ", 1)[0].strip() + "..."
+    return summary
+
+
 def _why_it_matters(draft: Any, memory_hits: list[dict[str, Any]], score: int) -> str:
+    """Return a code-path why-it-matters placeholder.
+
+    Plain English: in hybrid/model mode the LLM replaces this with real analysis.
+    The code-path version at least tells the reader what kind of signal this is and
+    why the base rubric scored it the way it did, rather than a generic placeholder.
+    """
     priorities = [item["name"] for item in draft.matched_priorities[:2]]
-    if memory_hits:
-        return f"Related to prior coverage, but may add a new angle. Matched {', '.join(priorities) if priorities else 'general AI/tech priorities'}."
+    entities = draft.entities or {}
+    companies = (entities.get("competitors", []) + entities.get("organizations", []))[:2]
+    company_str = " and ".join(companies) if companies else ""
+
+    if memory_hits and priorities:
+        return (
+            f"Revisits a topic Signal Stream has already covered ({', '.join(priorities)}). "
+            f"Worth reading if something meaningfully new has emerged since last time."
+        )
+    if priorities and company_str:
+        return (
+            f"Relevant to {', '.join(priorities)} with activity from {company_str}. "
+            f"Scored {score}/100 on the base rubric — check whether the development is concrete or speculative."
+        )
     if priorities:
-        return f"Matched {', '.join(priorities)} and landed at {score}/100 on the base rubric."
-    return "Potentially relevant AI/tech signal; review before acting."
+        return (
+            f"Matched {', '.join(priorities)}. "
+            f"Scored {score}/100 — review whether the article describes a real development or commentary."
+        )
+    if company_str:
+        return f"Involves {company_str}. Scored {score}/100 on the base rubric — verify strategic relevance before acting."
+    return (
+        f"Scored {score}/100 on the base rubric. "
+        "No priority keywords matched — may still be worth a read if the topic is timely."
+    )
 
 
 def _next_steps(event_type: str) -> list[str]:

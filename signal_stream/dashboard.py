@@ -2,11 +2,20 @@ from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import threading
 from urllib.parse import urlparse
 
+from .agent_runtime import AgentRuntimeError, SignalAgentRuntime
 from .models import SignalConfig
 from .prompt_loader import load_brain_file, save_brain_file, save_raw_brain_file
 from .storage import SignalStorage
+
+# ---------------------------------------------------------------------------
+# Background agent-run state — shared across all request threads.
+# Only one run can be active at a time; the lock prevents double-starts.
+# ---------------------------------------------------------------------------
+_run_lock = threading.Lock()
+_run_state: dict[str, object] = {"running": False, "error": ""}
 
 
 def dashboard_settings(config: SignalConfig) -> dict[str, object]:
@@ -26,21 +35,51 @@ def save_dashboard_settings(config: SignalConfig, payload: dict[str, object]) ->
     return dashboard_settings(config)
 
 
-def serve_dashboard(config: SignalConfig, host: str = "127.0.0.1", port: int | None = None) -> None:
+def serve_dashboard(
+    config: SignalConfig,
+    host: str = "127.0.0.1",
+    port: int | None = None,
+    config_path: str = "configs/ai_tech.toml",
+) -> None:
     """Start the local dashboard.
 
     Plain English: this is a tiny local website for watching what the agents did.
-    It reads SQLite and does not send your data anywhere.
+    It reads SQLite and does not send your data anywhere. The Run button triggers
+    a real agent run in a background thread without blocking the dashboard server.
     """
 
     storage = SignalStorage(config.storage_path)
     storage.init()
-    server = ThreadingHTTPServer((host, port or config.agent.dashboard_port), _handler(storage, config))
+    server = ThreadingHTTPServer((host, port or config.agent.dashboard_port), _handler(storage, config, config_path))
     print(f"Signal Stream dashboard: http://{host}:{server.server_port}")
     server.serve_forever()
 
 
-def _handler(storage: SignalStorage, config: SignalConfig) -> type[BaseHTTPRequestHandler]:
+def _start_agent_run(config: SignalConfig, config_path: str) -> bool:
+    """Spawn the agent in a daemon thread. Returns False if already running."""
+
+    with _run_lock:
+        if _run_state["running"]:
+            return False
+        _run_state["running"] = True
+        _run_state["error"] = ""
+
+    def _run() -> None:
+        try:
+            SignalAgentRuntime(config, config_path=config_path).run()
+        except AgentRuntimeError as exc:
+            _run_state["error"] = str(exc)
+        except Exception as exc:  # noqa: BLE001 - dashboard must stay alive regardless.
+            _run_state["error"] = f"Unexpected error: {exc}"
+        finally:
+            _run_state["running"] = False
+
+    thread = threading.Thread(target=_run, daemon=True, name="signal-agent-run")
+    thread.start()
+    return True
+
+
+def _handler(storage: SignalStorage, config: SignalConfig, config_path: str = "configs/ai_tech.toml") -> type[BaseHTTPRequestHandler]:
     class DashboardHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 - stdlib method name.
             path = urlparse(self.path).path
@@ -71,6 +110,10 @@ def _handler(storage: SignalStorage, config: SignalConfig) -> type[BaseHTTPReque
             if path == "/api/brain":
                 self._json({"raw": load_brain_file(config.agent.brain_file)["raw"]})
                 return
+            if path == "/api/run/state":
+                # Polled by the Run button to show live running indicator.
+                self._json({"running": _run_state["running"], "error": _run_state["error"]})
+                return
             self.send_response(404)
             self.end_headers()
 
@@ -78,6 +121,11 @@ def _handler(storage: SignalStorage, config: SignalConfig) -> type[BaseHTTPReque
             path = urlparse(self.path).path
             try:
                 payload = self._read_json()
+                if path == "/api/run":
+                    # Start the agent in a background thread. Returns immediately.
+                    started = _start_agent_run(config, config_path)
+                    self._json({"status": "started" if started else "already_running"})
+                    return
                 if path == "/api/settings":
                     self._json({"status": "ok", "settings": save_dashboard_settings(config, payload)})
                     return
@@ -178,14 +226,18 @@ DASHBOARD_HTML = """<!doctype html>
       <button class="secondary active" id="signals-tab" onclick="showView('signals')">Signals</button>
       <button class="secondary" id="settings-tab" onclick="showView('settings')">Settings</button>
       <button onclick="load()">Refresh</button>
+      <button id="run-btn" onclick="runAgent()">▶ Run Agent</button>
     </nav>
   </header>
   <main>
     <aside>
       <h2>Run</h2>
+      <div id="run-error" class="status" style="display:none;margin-bottom:8px"></div>
       <div class="metric">Status <b id="status">-</b></div>
       <div class="metric">Started <b id="started">-</b></div>
+      <div class="metric">Articles <b id="article-count">-</b></div>
       <div class="metric">Signals <b id="signal-count">-</b></div>
+      <div class="metric" style="font-size:12px;color:var(--muted)" id="run-goal"></div>
       <h2>Memory</h2>
       <div id="memory"></div>
     </aside>
@@ -294,18 +346,63 @@ DASHBOARD_HTML = """<!doctype html>
       </article>`;
     }
     async function load() {
-      const [run, events, tools, signals, memory] = await Promise.all([
-        get('/api/run/latest'), get('/api/events'), get('/api/tool-calls'), get('/api/signals'), get('/api/memory')
+      const [run, events, tools, signals, memory, runState] = await Promise.all([
+        get('/api/run/latest'), get('/api/events'), get('/api/tool-calls'), get('/api/signals'), get('/api/memory'), get('/api/run/state')
       ]);
+
+      // --- sidebar run summary (Fix 2) ---
+      const summary = (() => { try { return JSON.parse(run.summary_json || '{}'); } catch(e) { return {}; } })();
       document.getElementById('status').textContent = run.status || 'none';
       document.getElementById('started').textContent = run.started_at || '-';
+      document.getElementById('article-count').textContent = summary.articles != null ? summary.articles : '-';
       document.getElementById('signal-count').textContent = signals.length;
+      const goalEl = document.getElementById('run-goal');
+      if (run.goal) { goalEl.textContent = 'Goal: ' + run.goal; goalEl.style.display = ''; }
+      else goalEl.style.display = 'none';
+
+      // --- run button state ---
+      const btn = document.getElementById('run-btn');
+      const errEl = document.getElementById('run-error');
+      if (runState.running) {
+        btn.textContent = '⏳ Running…';
+        btn.disabled = true;
+      } else {
+        btn.textContent = '▶ Run Agent';
+        btn.disabled = false;
+      }
+      if (runState.error) {
+        errEl.textContent = '⚠ ' + runState.error;
+        errEl.style.display = '';
+      } else {
+        errEl.style.display = 'none';
+      }
+
+      // --- signals + timeline ---
       document.getElementById('signals').innerHTML = signals.length
         ? [renderSignal(signals[0], true)].concat(signals.slice(1).map(s => renderSignal(s))).join('')
         : '<div class="card">No signals yet.</div>';
       document.getElementById('events').innerHTML = events.map(e => `<div class="event"><b>${esc(e.agent)}</b> · ${esc(e.event_type)} · ${esc(e.message)}</div>`).join('') || '<div class="card">No events yet.</div>';
       document.getElementById('tools').innerHTML = tools.map(t => `<div class="event"><b>${esc(t.agent)}</b> called ${esc(t.tool)} · ${esc(t.status)} · confidence ${esc(t.confidence)}</div>`).join('') || '<div class="card">No tool calls yet.</div>';
       document.getElementById('memory').innerHTML = memory.map(m => `<div class="event"><b>${esc(m.topic)}</b><br>${esc(m.title)}</div>`).join('') || '<div class="event">No memory yet.</div>';
+    }
+
+    async function runAgent() {
+      const btn = document.getElementById('run-btn');
+      btn.textContent = '⏳ Starting…';
+      btn.disabled = true;
+      try {
+        const result = await post('/api/run', {});
+        if (result.status === 'already_running') {
+          btn.textContent = '⏳ Running…';
+        }
+      } catch(e) {
+        btn.textContent = '▶ Run Agent';
+        btn.disabled = false;
+        document.getElementById('run-error').textContent = '⚠ Could not start run: ' + e;
+        document.getElementById('run-error').style.display = '';
+      }
+      // Auto-refresh picks up the new status on the next tick.
+      setTimeout(load, 800);
     }
     async function loadSettings() {
       const brain = await get('/api/settings');
