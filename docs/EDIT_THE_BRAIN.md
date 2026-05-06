@@ -68,6 +68,8 @@ The `[behavior]` section controls the easiest product decisions:
 - `relevance_policy`: `soft_keep` keeps borderline items for Analyst review
 - `scout_note_enabled`: turns internal Scout notes on/off
 - `model_score_adjustment_limit`: how far the model can move the base score
+- `analyst_review_limit`: how many top candidate stories get model-written summaries. The default is low so local runs stay reasonable.
+- `analyst_full_review`: off by default for faster local runs; turn it on when using a stronger model
 - `summary_mode`: short only or short plus expanded summary
 - `visuals_mode`: article image, icon fallback, or no visuals
 - `repeat_penalty_strength`: how strongly memory lowers repeated stories
