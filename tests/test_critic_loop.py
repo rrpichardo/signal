@@ -33,32 +33,38 @@ class ScoreDigestQualityTest(unittest.TestCase):
         self.assertEqual(result["score"], 100)
         self.assertEqual(result["weak_indices"], [])
 
-    def test_low_value_phrase_flagged(self) -> None:
-        signals = [
-            self._good_signal(),
-            self._good_signal(title="Register now for our AI webinar"),
-        ]
-        result = score_digest_quality(signals, critic_prompt="", llm=None, critic_mode="code")
-        self.assertIn(1, result["weak_indices"])
-        self.assertTrue(any("webinar" in r or "low-value" in r for r in result["reasons"]))
-
     def test_missing_why_it_matters_flagged(self) -> None:
+        # Code path only checks structural integrity: is the field present at all?
+        # Content quality ("is it good?") belongs to the LLM Critic prompt in TOML.
         signals = [self._good_signal(why_it_matters="")]
         result = score_digest_quality(signals, critic_prompt="", llm=None, critic_mode="code")
         self.assertIn(0, result["weak_indices"])
         self.assertTrue(any("why_it_matters" in r for r in result["reasons"]))
 
     def test_missing_summary_flagged(self) -> None:
+        # Same principle: missing summary is a structural failure, not a content judgment.
         signals = [self._good_signal(short_summary="")]
         result = score_digest_quality(signals, critic_prompt="", llm=None, critic_mode="code")
         self.assertIn(0, result["weak_indices"])
         self.assertTrue(any("summary" in r for r in result["reasons"]))
 
-    def test_very_low_score_flagged(self) -> None:
+    def test_low_value_phrase_not_flagged_by_code_path(self) -> None:
+        # Low-value phrase detection is the LLM Critic's job (defined in configs/agent_brain.toml).
+        # The code path must NOT contain content rules — those belong in prompts.
+        signals = [
+            self._good_signal(),
+            self._good_signal(title="Register now for our AI webinar"),
+        ]
+        result = score_digest_quality(signals, critic_prompt="", llm=None, critic_mode="code")
+        # Index 1 has all required fields populated — code path passes it through.
+        self.assertNotIn(1, result["weak_indices"])
+
+    def test_low_score_not_flagged_by_code_path(self) -> None:
+        # Score quality judgment belongs to the LLM Critic, not to Python heuristics.
         signals = [self._good_signal(score=5)]
         result = score_digest_quality(signals, critic_prompt="", llm=None, critic_mode="code")
-        self.assertIn(0, result["weak_indices"])
-        self.assertTrue(any("score" in r for r in result["reasons"]))
+        # All fields are present — code path passes it through cleanly.
+        self.assertNotIn(0, result["weak_indices"])
 
     def test_score_decreases_with_more_weak_signals(self) -> None:
         good = score_digest_quality(

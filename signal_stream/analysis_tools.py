@@ -70,11 +70,11 @@ def analyze_articles(
         event_type = _theme(draft, insights)
         memory_hits = storage.memory_matches(f"{article.title} {article.body}", limit=3)
         score, score_breakdown = _base_score_card(article, draft, memory_hits, event_type, scoring_rubric or DEFAULT_SCORING_RUBRIC, behavior)
-        # Code-path fallback summaries. In hybrid/model mode the LLM overwrites
-        # these with proper prose. The code path needs to be readable on its own
-        # so we take more sentences and avoid echoing the headline as sentence 1.
-        short_summary = _code_short_summary(article)
-        expanded_summary = "" if behavior.get("summary_mode") == "short_only" else first_sentences(article.body, max_sentences=8, max_chars=1800)
+        # Code-path fallback: hand the LLM raw material, not a heuristic summary.
+        # The Analyst prompt specifies exactly how to rewrite this into proper prose.
+        # When Ollama is unavailable the raw excerpt is shown as-is — honest fallback.
+        short_summary = first_sentences(article.body, max_sentences=2, max_chars=200)
+        expanded_summary = "" if behavior.get("summary_mode") == "short_only" else first_sentences(article.body, max_sentences=4, max_chars=600)
         visuals_mode = str(behavior.get("visuals_mode", "image_icon"))
         image_url = str(article.raw.get("image_url", "")) if visuals_mode == "image_icon" else ""
         icon_key = _icon_key(event_type) if visuals_mode != "none" else ""
@@ -90,7 +90,7 @@ def analyze_articles(
             urgency=_urgency(score, config.critical_threshold),
             event_type=event_type,
             summary=short_summary,
-            why_it_matters=_why_it_matters(draft, memory_hits, score),
+            why_it_matters="",  # LLM Analyst writes this; Critic flags it if empty.
             next_steps=[],
             matched_priorities=draft.matched_priorities,
             entities=draft.entities,
@@ -209,90 +209,6 @@ def _theme(draft: Any, insights: list[ClusterInsight]) -> str:
         return "platform_shift"
     return "industry_signal"
 
-
-def _code_short_summary(article: Article) -> str:
-    """Build a code-path short summary that skips sentences that just echo the title.
-
-    Plain English: many RSS feeds repeat the headline as the first sentence of the
-    body. Taking that sentence as the summary is useless — the reader already sees
-    the title. We skip sentences with high word-overlap with the title and take the
-    next 3-4 substantive sentences instead, up to 320 characters.
-    """
-    body = normalize_space(article.body)
-    if not body:
-        return normalize_space(article.title)
-
-    # Tokenise title for overlap check (short words excluded to reduce false hits).
-    title_words = {w.lower() for w in article.title.split() if len(w) > 3}
-    sentences = [s.strip() for s in body.split(".") if s.strip()]
-    kept: list[str] = []
-    for sentence in sentences:
-        if len(kept) == 0 and title_words:
-            # Skip the first sentence if it overlaps heavily with the title.
-            sent_words = {w.lower() for w in sentence.split() if len(w) > 3}
-            overlap = len(title_words & sent_words) / max(len(title_words), 1)
-            if overlap > 0.65 and len(sentence) < len(article.title) * 1.6:
-                continue
-        kept.append(sentence)
-        if len(kept) >= 4:
-            break
-
-    if not kept:
-        # All sentences looked like title echoes — fall back to raw truncation.
-        return first_sentences(body, max_sentences=3, max_chars=320)
-
-    summary = ". ".join(kept).strip()
-    if not summary.endswith("."):
-        summary += "."
-    # Clip to 320 chars at a word boundary.
-    if len(summary) > 320:
-        summary = summary[:317].rsplit(" ", 1)[0].strip() + "..."
-    return summary
-
-
-def _why_it_matters(draft: Any, memory_hits: list[dict[str, Any]], score: int) -> str:
-    """Return a code-path why-it-matters placeholder.
-
-    Plain English: in hybrid/model mode the LLM replaces this with real analysis.
-    The code-path version at least tells the reader what kind of signal this is and
-    why the base rubric scored it the way it did, rather than a generic placeholder.
-    """
-    priorities = [item["name"] for item in draft.matched_priorities[:2]]
-    entities = draft.entities or {}
-    companies = (entities.get("competitors", []) + entities.get("organizations", []))[:2]
-    company_str = " and ".join(companies) if companies else ""
-
-    if memory_hits and priorities:
-        return (
-            f"Revisits a topic Signal Stream has already covered ({', '.join(priorities)}). "
-            f"Worth reading if something meaningfully new has emerged since last time."
-        )
-    if priorities and company_str:
-        return (
-            f"Relevant to {', '.join(priorities)} with activity from {company_str}. "
-            f"Scored {score}/100 on the base rubric — check whether the development is concrete or speculative."
-        )
-    if priorities:
-        return (
-            f"Matched {', '.join(priorities)}. "
-            f"Scored {score}/100 — review whether the article describes a real development or commentary."
-        )
-    if company_str:
-        return f"Involves {company_str}. Scored {score}/100 on the base rubric — verify strategic relevance before acting."
-    return (
-        f"Scored {score}/100 on the base rubric. "
-        "No priority keywords matched — may still be worth a read if the topic is timely."
-    )
-
-
-def _next_steps(event_type: str) -> list[str]:
-    if event_type in {"regulatory_risk", "asset_risk"}:
-        return ["Check whether this changes product or vendor risk.", "Watch for second-source confirmation."]
-    if event_type in {"competitor_move", "platform_shift"}:
-        return ["Compare against current product assumptions.", "Track follow-up posts from competitors and builders."]
-    if event_type == "market_opportunity":
-        return ["Identify who benefits if this trend continues.", "Look for funding, hiring, or customer evidence."]
-    return ["Save to memory if useful.", "Look for corroborating coverage before treating it as a major signal."]
 
 
 def _signal_json(signal: Signal) -> dict[str, Any]:
@@ -582,23 +498,6 @@ CRITIC_REVIEW_SCHEMA: dict[str, Any] = {
     "required": ["score", "weak_indices", "reasons"],
 }
 
-# Phrases that a good Analyst should have already removed; the Critic checks for
-# residue in the final ranked list as a quality gate before publishing.
-_CRITIC_LOW_VALUE_PHRASES = [
-    "webinar",
-    "register now",
-    "register for",
-    "sponsor",
-    "sponsored",
-    "roundup",
-    "top 10",
-    "top 5",
-    "we are hiring",
-    "job opening",
-    "course",
-]
-
-
 def score_digest_quality(
     signals: list[dict[str, Any]],
     critic_prompt: str,
@@ -610,10 +509,10 @@ def score_digest_quality(
 
     Returns a dict with keys: score (0-100), weak_indices (list[int]), reasons (list[str]).
 
-    The pure-code path checks for low-value residue, missing why-it-matters text,
-    and sub-threshold scores. The LLM path (critic_mode == 'hybrid' or 'model')
-    asks the Critic model to review the full signal list and can catch subtler
-    problems like duplicate stories that slipped through deduplication.
+    The code path does structural integrity only: are required fields present?
+    All content judgment (low-value phrases, score quality, duplicate detection,
+    summary quality) belongs to the LLM Critic via critic_prompt. The code path
+    is a safety net for when Ollama is unavailable — not a rule engine.
     """
 
     if not signals:
@@ -623,35 +522,19 @@ def score_digest_quality(
     weak_indices: list[int] = []
     reasons: list[str] = []
 
-    # Code-based checks — fast, deterministic, always run.
+    # Structural integrity only — these are data checks, not content judgments.
     for idx, signal in enumerate(signals):
         problems: list[str] = []
 
-        # Check for low-value phrase residue in title or summaries.
-        text = " ".join([
-            str(signal.get("title", "")),
-            str(signal.get("short_summary", "")),
-            str(signal.get("why_it_matters", "")),
-        ]).lower()
-        for phrase in _CRITIC_LOW_VALUE_PHRASES:
-            if phrase in text:
-                problems.append(f"low-value phrase residue: '{phrase}'")
-                break
-
-        # Flag signals where why_it_matters is missing or obviously generic.
+        # A missing why_it_matters means the LLM Analyst didn't run or failed.
         why = str(signal.get("why_it_matters", "")).strip()
-        if not why or len(why) < 20:
-            problems.append("why_it_matters is missing or too short")
+        if not why:
+            problems.append("why_it_matters is missing — Analyst did not complete this field")
 
-        # Flag signals where short_summary is absent.
+        # A missing summary means the signal has no usable content at all.
         summary = str(signal.get("short_summary", signal.get("summary", ""))).strip()
-        if not summary or len(summary) < 15:
-            problems.append("short_summary is missing or too short")
-
-        # Flag very low-scoring signals that made it past the Analyst threshold.
-        score_val = int(signal.get("score", 0))
-        if score_val < 20:
-            problems.append(f"score {score_val} is very low — may not belong in the digest")
+        if not summary:
+            problems.append("short_summary is missing — signal has no content")
 
         if problems:
             weak_indices.append(idx)
