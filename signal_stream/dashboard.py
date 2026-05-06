@@ -254,16 +254,24 @@ DASHBOARD_HTML = """<!doctype html>
       <div class="settings-grid">
         <div class="card">
           <h3>Agent Behavior</h3>
-          <label>Scout mode</label>
+          <label>Scout mode <small>(code = rules only · hybrid = code + LLM polish · model = LLM only)</small></label>
           <select id="scout_mode"><option>code</option><option>hybrid</option><option>model</option></select>
-          <label>Analyst mode</label>
+          <label>Analyst mode <small>(same meaning — controls who writes summaries)</small></label>
           <select id="analyst_mode"><option>code</option><option>hybrid</option><option>model</option></select>
           <label>Relevance policy</label>
           <select id="relevance_policy"><option value="soft_keep">soft keep borderline items</option><option value="hard_drop">hard drop model-labeled drop items</option></select>
-          <label>Model score adjustment limit</label>
+          <label>Model score adjustment limit <small>(hybrid mode only — caps how much the LLM can swing the base score)</small></label>
           <input id="model_score_adjustment_limit" type="number" min="0" max="100">
           <label>Repeat penalty strength</label>
           <select id="repeat_penalty_strength"><option>light</option><option>medium</option><option>strong</option></select>
+
+          <h3 style="margin-top:18px">Critic (Reflection Loop)</h3>
+          <label>Enable Critic <small>(reviews each digest before publishing; opt-in)</small></label>
+          <select id="enable_critic"><option value="true">enabled</option><option value="false">disabled</option></select>
+          <label>Max critic rounds <small>(0–5; how many revision loops before shipping anyway)</small></label>
+          <input id="max_critic_rounds" type="number" min="0" max="5">
+          <label>Critic score threshold <small>(0–100; digests below this score trigger a revision)</small></label>
+          <input id="critic_score_threshold" type="number" min="0" max="100">
         </div>
         <div class="card">
           <h3>Reader Experience</h3>
@@ -279,10 +287,11 @@ DASHBOARD_HTML = """<!doctype html>
       </div>
       <div class="settings-grid" style="margin-top:14px">
         <div class="card">
-          <h3>Prompts</h3>
-          <label>Orchestrator prompt</label><textarea id="prompt_orchestrator"></textarea>
-          <label>Scout prompt</label><textarea id="prompt_scout"></textarea>
-          <label>Analyst prompt</label><textarea id="prompt_analyst"></textarea>
+          <h3>Prompts <small>(this is where agent judgment lives — edit here, not in Python)</small></h3>
+          <label>Orchestrator prompt <small>(decides what the system does next)</small></label><textarea id="prompt_orchestrator"></textarea>
+          <label>Scout prompt <small>(controls how raw articles get enriched/labeled)</small></label><textarea id="prompt_scout"></textarea>
+          <label>Analyst prompt <small>(writes summaries + why-it-matters; word counts go here)</small></label><textarea id="prompt_analyst"></textarea>
+          <label>Critic prompt <small>(reviews the digest; flags weak signals — only used when Critic is enabled)</small></label><textarea id="prompt_critic"></textarea>
         </div>
         <div class="card">
           <h3>Scoring</h3>
@@ -412,9 +421,14 @@ DASHBOARD_HTML = """<!doctype html>
       }
       document.getElementById('scout_note_enabled').value = String(b.scout_note_enabled !== false);
       document.getElementById('model_score_adjustment_limit').value = b.model_score_adjustment_limit || 20;
+      // Critic-loop knobs (default off / 1 round / threshold 70 if missing).
+      document.getElementById('enable_critic').value = String(b.enable_critic === true);
+      document.getElementById('max_critic_rounds').value = b.max_critic_rounds != null ? b.max_critic_rounds : 1;
+      document.getElementById('critic_score_threshold').value = b.critic_score_threshold != null ? b.critic_score_threshold : 70;
       document.getElementById('prompt_orchestrator').value = p.orchestrator || '';
       document.getElementById('prompt_scout').value = p.scout || '';
       document.getElementById('prompt_analyst').value = p.analyst || '';
+      document.getElementById('prompt_critic').value = p.critic || '';
       const max = s.max_points || {};
       for (const key of ['priority_match','major_player','corroboration','repeat_penalty','low_value_penalty']) {
         document.getElementById('score_' + key).value = max[key] || 0;
@@ -433,12 +447,17 @@ DASHBOARD_HTML = """<!doctype html>
           summary_mode: document.getElementById('summary_mode').value,
           visuals_mode: document.getElementById('visuals_mode').value,
           repeat_penalty_strength: document.getElementById('repeat_penalty_strength').value,
-          entity_extraction: document.getElementById('entity_extraction').value
+          entity_extraction: document.getElementById('entity_extraction').value,
+          // Critic-loop knobs — persisted alongside the rest of behavior.
+          enable_critic: document.getElementById('enable_critic').value === 'true',
+          max_critic_rounds: Number(document.getElementById('max_critic_rounds').value || 1),
+          critic_score_threshold: Number(document.getElementById('critic_score_threshold').value || 70)
         },
         prompts: {
           orchestrator: document.getElementById('prompt_orchestrator').value,
           scout: document.getElementById('prompt_scout').value,
-          analyst: document.getElementById('prompt_analyst').value
+          analyst: document.getElementById('prompt_analyst').value,
+          critic: document.getElementById('prompt_critic').value
         },
         scoring: {
           max_points: {
