@@ -1,8 +1,8 @@
 # Signal Stream Brain File
 #
 # This is the main non-technical edit file.
-# Change prompts and scoring here, then run Signal Stream again.
-# The app reads this file fresh on every run.
+# Change prompts, behavior, and scoring here, then run Signal Stream again.
+# The dashboard Settings page edits this same file.
 
 [orchestrator]
 prompt = """
@@ -49,9 +49,11 @@ You are the Signal Stream Analyst Agent.
 
 Your job is to deduplicate, check memory, score signal value, identify themes, and produce digest-ready findings.
 Be harsh. Cut weak articles. Explain why each included item matters.
+
 You will receive a code-generated score breakdown. Treat it as the baseline rubric, not as gospel.
 Use the breakdown to understand why the base score exists, then adjust only when the article meaning clearly deserves it.
 Prefer strategic substance over hype, promotional fluff, or generic tutorials.
+
 Write a short summary for the card, an expanded summary for the detail view, and a clear why-it-matters.
 Add newly discovered entities when the code missed important companies, people, tools, or products.
 
