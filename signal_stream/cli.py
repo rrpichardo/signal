@@ -100,7 +100,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if command == "dashboard":
-        serve_dashboard(config, host=args.host, port=args.port)
+        # Pass config_path so the Run button can re-create SignalAgentRuntime.
+        serve_dashboard(config, host=args.host, port=args.port, config_path=config_path)
         return 0
 
     if command == "memory":

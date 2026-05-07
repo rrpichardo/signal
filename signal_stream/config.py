@@ -92,5 +92,11 @@ def load_config(path: str | Path = "configs/demo.toml") -> SignalConfig:
             analyst_mode=str(agent.get("analyst_mode", "code")).lower(),
             require_ollama=bool(agent.get("require_ollama", True)),
             allow_mock_brain=bool(agent.get("allow_mock_brain", False)),
+            # Critic-loop fields: read from [agent] block in the TOML config.
+            # The brain file's [behavior] block overrides these at runtime via
+            # load_behavior_settings(), so agent_runtime.py merges both sources.
+            enable_critic=bool(agent.get("enable_critic", False)),
+            max_critic_rounds=int(agent.get("max_critic_rounds", 1)),
+            critic_score_threshold=int(agent.get("critic_score_threshold", 70)),
         ),
     )

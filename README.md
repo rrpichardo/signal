@@ -26,6 +26,34 @@ python3 -m signal_stream dashboard --config configs/ai_tech.toml
 
 Then visit `http://127.0.0.1:8765`.
 
+## Dashboard UI
+
+The dashboard ships with a modern React + Vite frontend. Build it once before launching the dashboard:
+
+```bash
+cd web
+npm install
+npm run build
+cd ..
+python3 -m signal_stream dashboard --config configs/ai_tech.toml
+```
+
+The Python server automatically detects `web/dist/` and serves the React app. If `web/dist/` is absent, it falls back to the legacy inline dashboard so the dashboard never breaks on a fresh checkout.
+
+### Development workflow
+
+Run both servers at the same time for hot-reloading frontend dev:
+
+```bash
+# Terminal 1 — Python API server
+python3 -m signal_stream dashboard --config configs/ai_tech.toml
+
+# Terminal 2 — Vite dev server with /api proxy
+cd web && npm run dev
+```
+
+Then open `http://localhost:5173`. Vite proxies all `/api/*` requests to the Python backend on port 8765.
+
 For a 2020 Surface, start with `qwen3:1.7b` or `llama3.2:1b`. If you have 16 GB RAM and can tolerate slower runs, try `qwen3:4b` or `llama3.2:3b`.
 
 ## What Makes It Agentic

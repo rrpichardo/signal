@@ -3,8 +3,10 @@ from __future__ import annotations
 from dataclasses import asdict
 from pathlib import Path
 import json
+import queue
 import subprocess
 import sys
+import threading
 from typing import Any
 
 from .llm import OllamaClient
@@ -22,8 +24,16 @@ class WorkerClient:
     """Tiny wrapper around one subagent process.
 
     Plain English: this starts a second Python program and sends it one JSON
-    task at a time. That is what makes Scout and Analyst separate workers
-    instead of just function names inside the Orchestrator.
+    task at a time. That is what makes Scout, Analyst, and Critic separate
+    workers instead of just function names inside the Orchestrator.
+
+    M2 fix: stderr is sent to DEVNULL so a chatty worker can never fill the
+    64 KB pipe buffer and deadlock the orchestrator. Workers already report
+    errors as JSON on stdout, so stderr is not load-bearing.
+
+    M1 fix: stdout.readline() is wrapped in a thread + queue so the
+    worker_timeout_seconds config value is actually enforced. Previously this
+    call blocked forever if a worker hung, making the timeout setting a no-op.
     """
 
     def __init__(self, agent: str, config_path: str, timeout_seconds: int):
@@ -33,20 +43,43 @@ class WorkerClient:
             [sys.executable, "-m", "signal_stream.worker", agent, "--config", config_path],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            # DEVNULL prevents the stderr pipe buffer (~64 KB) from filling when
+            # a worker prints warnings or long tracebacks, which would otherwise
+            # cause a deadlock as both sides wait for the other to drain.
+            stderr=subprocess.DEVNULL,
             text=True,
             bufsize=1,
         )
+        # Background reader thread feeds stdout lines into a queue so request()
+        # can block with a timeout instead of blocking on readline() forever.
+        self._q: queue.Queue[str | None] = queue.Queue()
+        self._reader = threading.Thread(target=self._read_loop, daemon=True)
+        self._reader.start()
+
+    def _read_loop(self) -> None:
+        """Drain the worker's stdout into a queue; put None on EOF."""
+        try:
+            assert self.proc.stdout is not None
+            for line in self.proc.stdout:
+                self._q.put(line)
+        finally:
+            self._q.put(None)
 
     def request(self, task: dict[str, Any]) -> dict[str, Any]:
-        if self.proc.stdin is None or self.proc.stdout is None:
-            raise AgentRuntimeError(f"{self.agent} worker pipes are unavailable.")
+        if self.proc.stdin is None:
+            raise AgentRuntimeError(f"{self.agent} worker stdin is unavailable.")
         self.proc.stdin.write(json.dumps(task, sort_keys=True) + "\n")
         self.proc.stdin.flush()
-        line = self.proc.stdout.readline()
-        if not line:
-            error = self.proc.stderr.read() if self.proc.stderr else ""
-            raise AgentRuntimeError(f"{self.agent} worker exited without a response. {error}")
+        try:
+            line = self._q.get(timeout=self.timeout_seconds)
+        except queue.Empty:
+            self.proc.kill()
+            raise AgentRuntimeError(
+                f"{self.agent} worker timed out after {self.timeout_seconds}s. "
+                "Consider raising worker_timeout_seconds in the config."
+            )
+        if line is None:
+            raise AgentRuntimeError(f"{self.agent} worker exited without a response.")
         return json.loads(line)
 
     def close(self) -> None:
@@ -57,9 +90,8 @@ class WorkerClient:
             self.proc.wait(timeout=2)
         except Exception:  # noqa: BLE001 - best-effort worker cleanup.
             self.proc.kill()
-        for pipe in (self.proc.stdout, self.proc.stderr):
-            if pipe:
-                pipe.close()
+        if self.proc.stdout:
+            self.proc.stdout.close()
 
 
 class SignalAgentRuntime:
@@ -91,11 +123,20 @@ class SignalAgentRuntime:
 
         scout = WorkerClient("scout", self.config_path, self.config.agent.worker_timeout_seconds)
         analyst = WorkerClient("analyst", self.config_path, self.config.agent.worker_timeout_seconds)
+        # Critic worker is opt-in. Spawn it only when enable_critic is set so
+        # existing runs that don't use it pay no subprocess overhead.
+        critic: WorkerClient | None = (
+            WorkerClient("critic", self.config_path, self.config.agent.worker_timeout_seconds)
+            if self.config.agent.enable_critic
+            else None
+        )
         state: dict[str, Any] = {
             "goal": goal,
             "articles": [],
             "analysis": {},
             "context_rounds": 0,
+            "critic_rounds": 0,
+            "critic_notes": [],
             "actions": [],
             "finalized": False,
         }
@@ -137,8 +178,50 @@ class SignalAgentRuntime:
                     result = self._call_worker(run_id, analyst, "analyze_articles", {"articles": state["articles"]})
                     state["analysis"] = result.get("data", {})
                     self.storage.save_agent_event(run_id, "Analyst", "observation", "Analyzed candidate articles.", _compact_result(result))
+                elif decision.action == "critique_digest":
+                    # Step 2d: Critic reviews the Analyst's ranked signals before
+                    # the Orchestrator decides to ship. If the score is below the
+                    # configured threshold and critic rounds remain, revision notes
+                    # are attached to state so the next _decide() call sees them.
+                    if critic is None:
+                        # Critic not spawned (enable_critic=false). Auto-approve so
+                        # the Orchestrator can pick this action without crashing when
+                        # allow_mock_brain is on.
+                        self.storage.save_agent_event(run_id, "Critic", "skipped", "Critic is disabled; auto-approving digest.", {})
+                        state["finalized"] = True
+                        break
+                    result = self._call_worker(
+                        run_id,
+                        critic,
+                        "critique_digest",
+                        {"signals": state.get("analysis", {}).get("signals", [])},
+                    )
+                    critic_data = result.get("data", {})
+                    critic_score = int(critic_data.get("score", 100))
+                    weak_indices = list(critic_data.get("weak_indices", []))
+                    revision_reasons = list(critic_data.get("reasons", []))
+                    self.storage.save_agent_event(
+                        run_id,
+                        "Critic",
+                        "observation",
+                        f"Scored digest {critic_score}/100; {len(weak_indices)} weak signal(s).",
+                        {"score": critic_score, "weak_indices": weak_indices, "reasons": revision_reasons},
+                    )
+                    if (
+                        critic_score < self.config.agent.critic_score_threshold
+                        and state["critic_rounds"] < self.config.agent.max_critic_rounds
+                    ):
+                        # Revision requested: store notes for the Orchestrator's next
+                        # decision call, increment the counter so we don't loop forever.
+                        state["critic_notes"].extend(revision_reasons)
+                        state["critic_rounds"] += 1
+                        self.storage.save_agent_event(run_id, "Orchestrator", "revision", "Critic requested revision; looping.", {"critic_rounds": state["critic_rounds"]})
+                    else:
+                        # Score at/above threshold, or max rounds exhausted — publish.
+                        state["finalized"] = True
+                        break
                 elif decision.action == "finalize_digest":
-                    # Step 2d: The Orchestrator can stop early when it decides the
+                    # Step 2e: The Orchestrator can stop early when it decides the
                     # result is good enough.
                     state["finalized"] = True
                     break
@@ -165,6 +248,8 @@ class SignalAgentRuntime:
         finally:
             scout.close()
             analyst.close()
+            if critic is not None:
+                critic.close()
 
     def _decide(self, run_id: str, state: dict[str, Any], iteration: int) -> AgentDecision:
         """Ask Ollama what the Orchestrator should do next."""
@@ -180,6 +265,10 @@ class SignalAgentRuntime:
                 "signals_count": len(state.get("analysis", {}).get("signals", [])),
                 "top_titles": [item.get("title") for item in state.get("analysis", {}).get("signals", [])[:5]],
                 "context_rounds": state["context_rounds"],
+                # Critic revision notes are passed here so the Orchestrator can
+                # react to specific quality problems in its next decision.
+                "critic_rounds": state.get("critic_rounds", 0),
+                "critic_notes": state.get("critic_notes", []),
                 "previous_actions": state["actions"][-4:],
             },
             sort_keys=True,
@@ -234,6 +323,11 @@ def _mock_decision(state: dict[str, Any]) -> AgentDecision:
         return AgentDecision("Need Analyst review before finalizing.", "analyze_articles", reason="Articles exist but no ranked signals exist.", params={})
     if len(state.get("analysis", {}).get("signals", [])) < 3 and state["context_rounds"] < 1:
         return AgentDecision("Signals are thin; ask Scout for related context.", "collect_more_context", target="AI agents platform shifts", reason="Not enough candidate signals.", params={"limit": 5})
+    # When the Critic is enabled and has not yet reviewed, request a critique
+    # before finalizing. This makes the mock brain exercise the full four-agent
+    # loop in tests when enable_critic=true.
+    if state.get("critic_rounds", 0) == 0 and state.get("enable_critic_mock"):
+        return AgentDecision("Analyst is done; let Critic review before shipping.", "critique_digest", reason="Critic has not reviewed yet.", params={})
     return AgentDecision("Enough analysis exists to publish.", "finalize_digest", reason="Ranked signals are available.", params={})
 
 

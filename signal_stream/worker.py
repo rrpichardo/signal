@@ -8,7 +8,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from .analysis_tools import analyze_articles
+from .analysis_tools import analyze_articles, score_digest_quality
 from .config import load_config
 from .llm import OllamaClient
 from .models import SourceConfig
@@ -26,7 +26,7 @@ def main(argv: list[str] | None = None) -> int:
     """
 
     parser = argparse.ArgumentParser(description="Signal Stream worker process.")
-    parser.add_argument("agent", choices=["scout", "analyst"])
+    parser.add_argument("agent", choices=["scout", "analyst", "critic"])
     parser.add_argument("--config", default="configs/ai_tech.toml")
     args = parser.parse_args(argv)
 
@@ -115,6 +115,22 @@ def handle_task(
             behavior=behavior,
         )
         return _ok(task_id, agent, data, 0.82 if data.get("signals") else 0.25)
+
+    if agent == "critic" and task_type == "critique_digest":
+        # The Critic scores the Analyst's ranked signals before the Orchestrator
+        # decides whether to ship. It runs code checks always and optionally calls
+        # the LLM in hybrid/model mode using the analyst_mode setting as a proxy
+        # (critics review Analyst output, so the same mode switch makes sense).
+        llm = OllamaClient(config) if _mode(behavior, config, "analyst") in {"hybrid", "model"} else None
+        data = score_digest_quality(
+            signals=list(payload.get("signals", [])),
+            critic_prompt=prompts.get("critic", ""),
+            llm=llm,
+            critic_mode=_mode(behavior, config, "analyst"),
+        )
+        # Confidence is high when the score is high — nothing suspicious.
+        confidence = max(0.1, min(1.0, data.get("score", 0) / 100))
+        return _ok(task_id, agent, data, confidence)
 
     return {
         "task_id": task_id,

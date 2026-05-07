@@ -2,11 +2,84 @@ from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import mimetypes
+import os
+import pathlib
+from pathlib import Path
+import signal
+import threading
 from urllib.parse import urlparse
 
+from .agent_runtime import AgentRuntimeError, SignalAgentRuntime
 from .models import SignalConfig
 from .prompt_loader import load_brain_file, save_brain_file, save_raw_brain_file
 from .storage import SignalStorage
+
+# ---------------------------------------------------------------------------
+# Background agent-run state — shared across all request threads.
+# Only one run can be active at a time; the lock prevents double-starts.
+# ---------------------------------------------------------------------------
+_run_lock = threading.Lock()
+_run_state: dict[str, object] = {"running": False, "error": ""}
+
+
+# ---------------------------------------------------------------------------
+# PID-file helpers — guarantee exactly one dashboard process at a time.
+# ---------------------------------------------------------------------------
+
+def _pid_path(storage_path: str) -> Path:
+    """Return the path to the dashboard PID file, next to the SQLite DB."""
+    return Path(storage_path).parent / ".dashboard.pid"
+
+
+def _kill_existing_dashboard(storage_path: str) -> None:
+    """Kill any previously running dashboard process recorded in the PID file."""
+    pid_file = _pid_path(storage_path)
+    if not pid_file.exists():
+        return
+    try:
+        old_pid = int(pid_file.read_text().strip())
+        # Send SIGTERM — polite shutdown; the process cleans up its own PID file.
+        os.kill(old_pid, signal.SIGTERM)
+        # Brief wait so the port is released before we try to bind.
+        import time
+        time.sleep(0.5)
+    except (ProcessLookupError, ValueError):
+        # Process already gone or PID file was corrupt — ignore.
+        pass
+    finally:
+        pid_file.unlink(missing_ok=True)
+
+
+def _write_dashboard_pid(storage_path: str) -> None:
+    """Write the current process PID so future launches can kill this one."""
+    _pid_path(storage_path).write_text(str(os.getpid()))
+
+
+def _remove_dashboard_pid(storage_path: str) -> None:
+    """Remove the PID file on clean shutdown."""
+    _pid_path(storage_path).unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# React/Vite static file serving helpers.
+# ---------------------------------------------------------------------------
+
+# Allowed extensions when serving files from web/dist/assets/.
+# Kept tight so the handler can't accidentally serve .py or .toml files.
+_ALLOWED_EXTENSIONS = {".js", ".css", ".svg", ".png", ".ico", ".woff", ".woff2", ".map", ".txt"}
+
+
+def _static_dist() -> pathlib.Path:
+    """Return the path to web/dist relative to the repo root.
+
+    Plain English: walk up from dashboard.py (signal_stream/) to the repo root,
+    then append web/dist.  This works however the package is installed because
+    __file__ is always the real file on disk.
+    """
+    # __file__ is  <repo>/signal_stream/dashboard.py  →  parents[1] is <repo>/
+    repo_root = pathlib.Path(__file__).resolve().parents[1]
+    return repo_root / "web" / "dist"
 
 
 def dashboard_settings(config: SignalConfig) -> dict[str, object]:
@@ -26,27 +99,120 @@ def save_dashboard_settings(config: SignalConfig, payload: dict[str, object]) ->
     return dashboard_settings(config)
 
 
-def serve_dashboard(config: SignalConfig, host: str = "127.0.0.1", port: int | None = None) -> None:
+def serve_dashboard(
+    config: SignalConfig,
+    host: str = "127.0.0.1",
+    port: int | None = None,
+    config_path: str = "configs/ai_tech.toml",
+) -> None:
     """Start the local dashboard.
 
     Plain English: this is a tiny local website for watching what the agents did.
-    It reads SQLite and does not send your data anywhere.
+    It reads SQLite and does not send your data anywhere. The Run button triggers
+    a real agent run in a background thread without blocking the dashboard server.
     """
+
+    # Kill any previous dashboard instance so there is always exactly one
+    # process running on exactly the configured port.
+    _kill_existing_dashboard(config.storage_path)
 
     storage = SignalStorage(config.storage_path)
     storage.init()
-    server = ThreadingHTTPServer((host, port or config.agent.dashboard_port), _handler(storage, config))
+
+    target_port = port or config.agent.dashboard_port
+    server = ThreadingHTTPServer((host, target_port), _handler(storage, config, config_path))
+
+    # Record our PID so the *next* launch can cleanly replace us.
+    _write_dashboard_pid(config.storage_path)
+
     print(f"Signal Stream dashboard: http://{host}:{server.server_port}")
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        # Clean up PID file when the server exits normally.
+        _remove_dashboard_pid(config.storage_path)
 
 
-def _handler(storage: SignalStorage, config: SignalConfig) -> type[BaseHTTPRequestHandler]:
+def _start_agent_run(config: SignalConfig, config_path: str) -> bool:
+    """Spawn the agent in a daemon thread. Returns False if already running."""
+
+    with _run_lock:
+        if _run_state["running"]:
+            return False
+        _run_state["running"] = True
+        _run_state["error"] = ""
+
+    def _run() -> None:
+        try:
+            SignalAgentRuntime(config, config_path=config_path).run()
+        except AgentRuntimeError as exc:
+            _run_state["error"] = str(exc)
+        except Exception as exc:  # noqa: BLE001 - dashboard must stay alive regardless.
+            _run_state["error"] = f"Unexpected error: {exc}"
+        finally:
+            _run_state["running"] = False
+
+    thread = threading.Thread(target=_run, daemon=True, name="signal-agent-run")
+    thread.start()
+    return True
+
+
+def _handler(storage: SignalStorage, config: SignalConfig, config_path: str = "configs/ai_tech.toml") -> type[BaseHTTPRequestHandler]:
     class DashboardHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 - stdlib method name.
             path = urlparse(self.path).path
-            if path == "/":
-                self._send("text/html; charset=utf-8", DASHBOARD_HTML)
+            dist = _static_dist()
+
+            # --- Static asset serving (only when web/dist/ exists) ----------
+            if dist.is_dir():
+                # Serve hashed asset files from web/dist/assets/*.
+                # Path traversal guard: reject any segment that is ".." so a
+                # crafted URL like /assets/../../signal_stream/models.py can't
+                # escape the dist directory.
+                if path.startswith("/assets/") or path in ("/favicon.svg", "/favicon.ico", "/vite.svg"):
+                    # Resolve the file path inside dist without following symlinks.
+                    rel = path.lstrip("/")
+                    if ".." in rel.split("/"):
+                        self.send_response(403)
+                        self.end_headers()
+                        return
+                    file_path = dist / rel
+                    ext = file_path.suffix.lower()
+                    if ext not in _ALLOWED_EXTENSIONS or not file_path.is_file():
+                        self.send_response(404)
+                        self.end_headers()
+                        return
+                    data = file_path.read_bytes()
+                    mime = mimetypes.types_map.get(ext, "application/octet-stream")
+                    self.send_response(200)
+                    self.send_header("Content-Type", mime)
+                    self.send_header("Content-Length", str(len(data)))
+                    # Hashed asset files can be cached indefinitely; index.html never.
+                    self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
+
+                # SPA fallback: serve index.html for every non-API path so
+                # react-router deep links survive a hard reload.
+                if not path.startswith("/api/"):
+                    index = dist / "index.html"
+                    if index.is_file():
+                        data = index.read_bytes()
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/html; charset=utf-8")
+                        self.send_header("Content-Length", str(len(data)))
+                        self.send_header("Cache-Control", "no-cache")
+                        self.end_headers()
+                        self.wfile.write(data)
+                        return
+
+            # --- Legacy dashboard (served when web/dist/ is absent) ----------
+            if path == "/" and not dist.is_dir():
+                self._send("text/html; charset=utf-8", LEGACY_DASHBOARD_HTML)
                 return
+
+            # --- JSON API routes (unchanged) ---------------------------------
             if path == "/api/run/latest":
                 run = storage.latest_agent_run() or {}
                 self._json(run)
@@ -71,6 +237,10 @@ def _handler(storage: SignalStorage, config: SignalConfig) -> type[BaseHTTPReque
             if path == "/api/brain":
                 self._json({"raw": load_brain_file(config.agent.brain_file)["raw"]})
                 return
+            if path == "/api/run/state":
+                # Polled by the Run button to show live running indicator.
+                self._json({"running": _run_state["running"], "error": _run_state["error"]})
+                return
             self.send_response(404)
             self.end_headers()
 
@@ -78,6 +248,11 @@ def _handler(storage: SignalStorage, config: SignalConfig) -> type[BaseHTTPReque
             path = urlparse(self.path).path
             try:
                 payload = self._read_json()
+                if path == "/api/run":
+                    # Start the agent in a background thread. Returns immediately.
+                    started = _start_agent_run(config, config_path)
+                    self._json({"status": "started" if started else "already_running"})
+                    return
                 if path == "/api/settings":
                     self._json({"status": "ok", "settings": save_dashboard_settings(config, payload)})
                     return
@@ -119,7 +294,8 @@ def _handler(storage: SignalStorage, config: SignalConfig) -> type[BaseHTTPReque
     return DashboardHandler
 
 
-DASHBOARD_HTML = """<!doctype html>
+# Kept as a safety net — served when web/dist/ hasn't been built yet.
+LEGACY_DASHBOARD_HTML = """<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -178,14 +354,18 @@ DASHBOARD_HTML = """<!doctype html>
       <button class="secondary active" id="signals-tab" onclick="showView('signals')">Signals</button>
       <button class="secondary" id="settings-tab" onclick="showView('settings')">Settings</button>
       <button onclick="load()">Refresh</button>
+      <button id="run-btn" onclick="runAgent()">▶ Run Agent</button>
     </nav>
   </header>
   <main>
     <aside>
       <h2>Run</h2>
+      <div id="run-error" class="status" style="display:none;margin-bottom:8px"></div>
       <div class="metric">Status <b id="status">-</b></div>
       <div class="metric">Started <b id="started">-</b></div>
+      <div class="metric">Articles <b id="article-count">-</b></div>
       <div class="metric">Signals <b id="signal-count">-</b></div>
+      <div class="metric" style="font-size:12px;color:var(--muted)" id="run-goal"></div>
       <h2>Memory</h2>
       <div id="memory"></div>
     </aside>
@@ -202,16 +382,24 @@ DASHBOARD_HTML = """<!doctype html>
       <div class="settings-grid">
         <div class="card">
           <h3>Agent Behavior</h3>
-          <label>Scout mode</label>
+          <label>Scout mode <small>(code = rules only · hybrid = code + LLM polish · model = LLM only)</small></label>
           <select id="scout_mode"><option>code</option><option>hybrid</option><option>model</option></select>
-          <label>Analyst mode</label>
+          <label>Analyst mode <small>(same meaning — controls who writes summaries)</small></label>
           <select id="analyst_mode"><option>code</option><option>hybrid</option><option>model</option></select>
           <label>Relevance policy</label>
           <select id="relevance_policy"><option value="soft_keep">soft keep borderline items</option><option value="hard_drop">hard drop model-labeled drop items</option></select>
-          <label>Model score adjustment limit</label>
+          <label>Model score adjustment limit <small>(hybrid mode only — caps how much the LLM can swing the base score)</small></label>
           <input id="model_score_adjustment_limit" type="number" min="0" max="100">
           <label>Repeat penalty strength</label>
           <select id="repeat_penalty_strength"><option>light</option><option>medium</option><option>strong</option></select>
+
+          <h3 style="margin-top:18px">Critic (Reflection Loop)</h3>
+          <label>Enable Critic <small>(reviews each digest before publishing; opt-in)</small></label>
+          <select id="enable_critic"><option value="true">enabled</option><option value="false">disabled</option></select>
+          <label>Max critic rounds <small>(0–5; how many revision loops before shipping anyway)</small></label>
+          <input id="max_critic_rounds" type="number" min="0" max="5">
+          <label>Critic score threshold <small>(0–100; digests below this score trigger a revision)</small></label>
+          <input id="critic_score_threshold" type="number" min="0" max="100">
         </div>
         <div class="card">
           <h3>Reader Experience</h3>
@@ -227,10 +415,11 @@ DASHBOARD_HTML = """<!doctype html>
       </div>
       <div class="settings-grid" style="margin-top:14px">
         <div class="card">
-          <h3>Prompts</h3>
-          <label>Orchestrator prompt</label><textarea id="prompt_orchestrator"></textarea>
-          <label>Scout prompt</label><textarea id="prompt_scout"></textarea>
-          <label>Analyst prompt</label><textarea id="prompt_analyst"></textarea>
+          <h3>Prompts <small>(this is where agent judgment lives — edit here, not in Python)</small></h3>
+          <label>Orchestrator prompt <small>(decides what the system does next)</small></label><textarea id="prompt_orchestrator"></textarea>
+          <label>Scout prompt <small>(controls how raw articles get enriched/labeled)</small></label><textarea id="prompt_scout"></textarea>
+          <label>Analyst prompt <small>(writes summaries + why-it-matters; word counts go here)</small></label><textarea id="prompt_analyst"></textarea>
+          <label>Critic prompt <small>(reviews the digest; flags weak signals — only used when Critic is enabled)</small></label><textarea id="prompt_critic"></textarea>
         </div>
         <div class="card">
           <h3>Scoring</h3>
@@ -294,18 +483,63 @@ DASHBOARD_HTML = """<!doctype html>
       </article>`;
     }
     async function load() {
-      const [run, events, tools, signals, memory] = await Promise.all([
-        get('/api/run/latest'), get('/api/events'), get('/api/tool-calls'), get('/api/signals'), get('/api/memory')
+      const [run, events, tools, signals, memory, runState] = await Promise.all([
+        get('/api/run/latest'), get('/api/events'), get('/api/tool-calls'), get('/api/signals'), get('/api/memory'), get('/api/run/state')
       ]);
+
+      // --- sidebar run summary (Fix 2) ---
+      const summary = (() => { try { return JSON.parse(run.summary_json || '{}'); } catch(e) { return {}; } })();
       document.getElementById('status').textContent = run.status || 'none';
       document.getElementById('started').textContent = run.started_at || '-';
+      document.getElementById('article-count').textContent = summary.articles != null ? summary.articles : '-';
       document.getElementById('signal-count').textContent = signals.length;
+      const goalEl = document.getElementById('run-goal');
+      if (run.goal) { goalEl.textContent = 'Goal: ' + run.goal; goalEl.style.display = ''; }
+      else goalEl.style.display = 'none';
+
+      // --- run button state ---
+      const btn = document.getElementById('run-btn');
+      const errEl = document.getElementById('run-error');
+      if (runState.running) {
+        btn.textContent = '⏳ Running…';
+        btn.disabled = true;
+      } else {
+        btn.textContent = '▶ Run Agent';
+        btn.disabled = false;
+      }
+      if (runState.error) {
+        errEl.textContent = '⚠ ' + runState.error;
+        errEl.style.display = '';
+      } else {
+        errEl.style.display = 'none';
+      }
+
+      // --- signals + timeline ---
       document.getElementById('signals').innerHTML = signals.length
         ? [renderSignal(signals[0], true)].concat(signals.slice(1).map(s => renderSignal(s))).join('')
         : '<div class="card">No signals yet.</div>';
       document.getElementById('events').innerHTML = events.map(e => `<div class="event"><b>${esc(e.agent)}</b> · ${esc(e.event_type)} · ${esc(e.message)}</div>`).join('') || '<div class="card">No events yet.</div>';
       document.getElementById('tools').innerHTML = tools.map(t => `<div class="event"><b>${esc(t.agent)}</b> called ${esc(t.tool)} · ${esc(t.status)} · confidence ${esc(t.confidence)}</div>`).join('') || '<div class="card">No tool calls yet.</div>';
       document.getElementById('memory').innerHTML = memory.map(m => `<div class="event"><b>${esc(m.topic)}</b><br>${esc(m.title)}</div>`).join('') || '<div class="event">No memory yet.</div>';
+    }
+
+    async function runAgent() {
+      const btn = document.getElementById('run-btn');
+      btn.textContent = '⏳ Starting…';
+      btn.disabled = true;
+      try {
+        const result = await post('/api/run', {});
+        if (result.status === 'already_running') {
+          btn.textContent = '⏳ Running…';
+        }
+      } catch(e) {
+        btn.textContent = '▶ Run Agent';
+        btn.disabled = false;
+        document.getElementById('run-error').textContent = '⚠ Could not start run: ' + e;
+        document.getElementById('run-error').style.display = '';
+      }
+      // Auto-refresh picks up the new status on the next tick.
+      setTimeout(load, 800);
     }
     async function loadSettings() {
       const brain = await get('/api/settings');
@@ -315,9 +549,14 @@ DASHBOARD_HTML = """<!doctype html>
       }
       document.getElementById('scout_note_enabled').value = String(b.scout_note_enabled !== false);
       document.getElementById('model_score_adjustment_limit').value = b.model_score_adjustment_limit || 20;
+      // Critic-loop knobs (default off / 1 round / threshold 70 if missing).
+      document.getElementById('enable_critic').value = String(b.enable_critic === true);
+      document.getElementById('max_critic_rounds').value = b.max_critic_rounds != null ? b.max_critic_rounds : 1;
+      document.getElementById('critic_score_threshold').value = b.critic_score_threshold != null ? b.critic_score_threshold : 70;
       document.getElementById('prompt_orchestrator').value = p.orchestrator || '';
       document.getElementById('prompt_scout').value = p.scout || '';
       document.getElementById('prompt_analyst').value = p.analyst || '';
+      document.getElementById('prompt_critic').value = p.critic || '';
       const max = s.max_points || {};
       for (const key of ['priority_match','major_player','corroboration','repeat_penalty','low_value_penalty']) {
         document.getElementById('score_' + key).value = max[key] || 0;
@@ -336,12 +575,17 @@ DASHBOARD_HTML = """<!doctype html>
           summary_mode: document.getElementById('summary_mode').value,
           visuals_mode: document.getElementById('visuals_mode').value,
           repeat_penalty_strength: document.getElementById('repeat_penalty_strength').value,
-          entity_extraction: document.getElementById('entity_extraction').value
+          entity_extraction: document.getElementById('entity_extraction').value,
+          // Critic-loop knobs — persisted alongside the rest of behavior.
+          enable_critic: document.getElementById('enable_critic').value === 'true',
+          max_critic_rounds: Number(document.getElementById('max_critic_rounds').value || 1),
+          critic_score_threshold: Number(document.getElementById('critic_score_threshold').value || 70)
         },
         prompts: {
           orchestrator: document.getElementById('prompt_orchestrator').value,
           scout: document.getElementById('prompt_scout').value,
-          analyst: document.getElementById('prompt_analyst').value
+          analyst: document.getElementById('prompt_analyst').value,
+          critic: document.getElementById('prompt_critic').value
         },
         scoring: {
           max_points: {

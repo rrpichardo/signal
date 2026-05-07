@@ -58,6 +58,11 @@ class AgentConfig:
     analyst_mode: str = "code"
     require_ollama: bool = True
     allow_mock_brain: bool = False
+    # Critic-loop configuration. Defaults to off so existing runs are unchanged.
+    # Flip enable_critic in configs/agent_brain.toml [behavior] to activate.
+    enable_critic: bool = False
+    max_critic_rounds: int = 1
+    critic_score_threshold: int = 70
 
 
 @dataclass

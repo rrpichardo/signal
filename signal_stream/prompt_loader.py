@@ -5,13 +5,17 @@ from pathlib import Path
 import tomllib
 from typing import Any
 
-from .prompts import ANALYST_PROMPT, ORCHESTRATOR_PROMPT, SCOUT_PROMPT
+from .prompts import ANALYST_PROMPT, CRITIC_PROMPT, ORCHESTRATOR_PROMPT, SCOUT_PROMPT
 
 
+# Adding "critic" here makes the Critic worker discoverable everywhere prompts
+# are loaded: agent runtime, worker startup, dashboard settings page, and the
+# brain-file render below.
 DEFAULT_PROMPTS = {
     "orchestrator": ORCHESTRATOR_PROMPT,
     "scout": SCOUT_PROMPT,
     "analyst": ANALYST_PROMPT,
+    "critic": CRITIC_PROMPT,
 }
 
 DEFAULT_SCORING_RUBRIC: dict[str, Any] = {
@@ -66,6 +70,10 @@ DEFAULT_BEHAVIOR_SETTINGS: dict[str, Any] = {
     "visuals_mode": "image_icon",
     "repeat_penalty_strength": "strong",
     "entity_extraction": "hybrid",
+    # Critic-loop defaults: opt-in. Existing runs keep the old three-agent shape.
+    "enable_critic": False,
+    "max_critic_rounds": 1,
+    "critic_score_threshold": 70,
 }
 
 
@@ -137,6 +145,19 @@ def load_behavior_settings(path: str | Path | None) -> dict[str, Any]:
     if "model_score_adjustment_limit" in behavior:
         try:
             settings["model_score_adjustment_limit"] = max(0, min(100, int(behavior["model_score_adjustment_limit"])))
+        except (TypeError, ValueError):
+            pass
+    # Critic-loop switches: bool toggle and two bounded integers.
+    if "enable_critic" in behavior:
+        settings["enable_critic"] = bool(behavior.get("enable_critic"))
+    if "max_critic_rounds" in behavior:
+        try:
+            settings["max_critic_rounds"] = max(0, min(5, int(behavior["max_critic_rounds"])))
+        except (TypeError, ValueError):
+            pass
+    if "critic_score_threshold" in behavior:
+        try:
+            settings["critic_score_threshold"] = max(0, min(100, int(behavior["critic_score_threshold"])))
         except (TypeError, ValueError):
             pass
     return settings
@@ -227,7 +248,9 @@ def _render_brain_toml(prompts: dict[str, str], scoring: dict[str, Any], behavio
         "# The dashboard Settings page edits this same file.",
         "",
     ]
-    for name in ("orchestrator", "scout", "analyst"):
+    # Iterate over all four agent prompt sections so the editable brain file
+    # always exposes the Critic alongside the other three.
+    for name in ("orchestrator", "scout", "analyst", "critic"):
         lines.extend([f"[{name}]", 'prompt = """', str(prompts.get(name, "")).strip(), '"""', ""])
 
     lines.extend(
@@ -243,6 +266,11 @@ def _render_brain_toml(prompts: dict[str, str], scoring: dict[str, Any], behavio
             f'visuals_mode = "{_toml_text(behavior.get("visuals_mode", "image_icon"))}"',
             f'repeat_penalty_strength = "{_toml_text(behavior.get("repeat_penalty_strength", "strong"))}"',
             f'entity_extraction = "{_toml_text(behavior.get("entity_extraction", "hybrid"))}"',
+            # Critic-loop switches live next to the other behavior knobs so a non-
+            # technical editor can flip them in one place.
+            f"enable_critic = {_toml_bool(behavior.get('enable_critic', False))}",
+            f"max_critic_rounds = {int(behavior.get('max_critic_rounds', 1))}",
+            f"critic_score_threshold = {int(behavior.get('critic_score_threshold', 70))}",
             "",
             "[scoring.freshness]",
             "# Newer stories score higher.",
