@@ -50,7 +50,23 @@ def serve_dashboard(
 
     storage = SignalStorage(config.storage_path)
     storage.init()
-    server = ThreadingHTTPServer((host, port or config.agent.dashboard_port), _handler(storage, config, config_path))
+
+    # Try the configured port first, then walk up to find a free one.
+    # Prevents "Address already in use" crash when restarting the dashboard
+    # while a previous instance is still bound to the same port.
+    start_port = port or config.agent.dashboard_port
+    for attempt in range(20):
+        candidate = start_port + attempt
+        try:
+            server = ThreadingHTTPServer((host, candidate), _handler(storage, config, config_path))
+            break  # Successfully bound — stop looking.
+        except OSError:
+            if attempt == 19:
+                raise RuntimeError(
+                    f"Could not bind to any port in {start_port}–{start_port + 19}. "
+                    "Kill the existing dashboard process and retry."
+                )
+
     print(f"Signal Stream dashboard: http://{host}:{server.server_port}")
     server.serve_forever()
 
