@@ -274,6 +274,22 @@ class SignalAgentRuntime:
             sort_keys=True,
         )
         raw = self.llm.chat_json(self.prompts["orchestrator"], user, DECISION_SCHEMA)
+        # Log the full brain trace — system prompt, user payload, raw model
+        # response — as one event so the dashboard timeline can show exactly
+        # what was sent to Ollama and exactly what came back. getattr() guards
+        # against test mocks that don't expose last_response_text.
+        self.storage.save_agent_event(
+            run_id,
+            "Orchestrator",
+            "llm_trace",
+            "Brain call: prompt + raw response.",
+            {
+                "system": self.prompts["orchestrator"],
+                "user": user,
+                "raw_response": getattr(self.llm, "last_response_text", ""),
+                "parse_error": self.llm.last_error if not raw else "",
+            },
+        )
         if not raw:
             self.storage.save_agent_event(run_id, "Orchestrator", "warning", "Ollama decision failed; using safe local decision.", {"error": self.llm.last_error or ""})
             return _mock_decision(state)
@@ -297,8 +313,16 @@ class SignalAgentRuntime:
                 agent=worker.agent.title(),
                 tool=task_type,
                 status=str(result.get("status", "unknown")),
-                input={"task_type": task_type},
-                output=_compact_result(result),
+                # Echo the actual task payload, not just its type — debugging the
+                # Orchestrator means knowing what query Scout was asked for, not
+                # only that "collect_more_context" was called.
+                input={"task_type": task_type, "payload": payload},
+                # Store the full uncompacted result so the side-sheet inspector
+                # in the dashboard shows every article Scout pulled and every
+                # signal Analyst produced. _compact_result is still used for
+                # the timeline event payloads above; the table that drives the
+                # inspector pane gets the real data.
+                output=result,
                 error=str(result.get("error", "")),
                 confidence=float(result.get("confidence", 0.0)),
             )
