@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
+from pathlib import Path
+import signal
 import threading
 from urllib.parse import urlparse
 
@@ -16,6 +19,44 @@ from .storage import SignalStorage
 # ---------------------------------------------------------------------------
 _run_lock = threading.Lock()
 _run_state: dict[str, object] = {"running": False, "error": ""}
+
+
+# ---------------------------------------------------------------------------
+# PID-file helpers — guarantee exactly one dashboard process at a time.
+# ---------------------------------------------------------------------------
+
+def _pid_path(storage_path: str) -> Path:
+    """Return the path to the dashboard PID file, next to the SQLite DB."""
+    return Path(storage_path).parent / ".dashboard.pid"
+
+
+def _kill_existing_dashboard(storage_path: str) -> None:
+    """Kill any previously running dashboard process recorded in the PID file."""
+    pid_file = _pid_path(storage_path)
+    if not pid_file.exists():
+        return
+    try:
+        old_pid = int(pid_file.read_text().strip())
+        # Send SIGTERM — polite shutdown; the process cleans up its own PID file.
+        os.kill(old_pid, signal.SIGTERM)
+        # Brief wait so the port is released before we try to bind.
+        import time
+        time.sleep(0.5)
+    except (ProcessLookupError, ValueError):
+        # Process already gone or PID file was corrupt — ignore.
+        pass
+    finally:
+        pid_file.unlink(missing_ok=True)
+
+
+def _write_dashboard_pid(storage_path: str) -> None:
+    """Write the current process PID so future launches can kill this one."""
+    _pid_path(storage_path).write_text(str(os.getpid()))
+
+
+def _remove_dashboard_pid(storage_path: str) -> None:
+    """Remove the PID file on clean shutdown."""
+    _pid_path(storage_path).unlink(missing_ok=True)
 
 
 def dashboard_settings(config: SignalConfig) -> dict[str, object]:
@@ -48,27 +89,25 @@ def serve_dashboard(
     a real agent run in a background thread without blocking the dashboard server.
     """
 
+    # Kill any previous dashboard instance so there is always exactly one
+    # process running on exactly the configured port.
+    _kill_existing_dashboard(config.storage_path)
+
     storage = SignalStorage(config.storage_path)
     storage.init()
 
-    # Try the configured port first, then walk up to find a free one.
-    # Prevents "Address already in use" crash when restarting the dashboard
-    # while a previous instance is still bound to the same port.
-    start_port = port or config.agent.dashboard_port
-    for attempt in range(20):
-        candidate = start_port + attempt
-        try:
-            server = ThreadingHTTPServer((host, candidate), _handler(storage, config, config_path))
-            break  # Successfully bound — stop looking.
-        except OSError:
-            if attempt == 19:
-                raise RuntimeError(
-                    f"Could not bind to any port in {start_port}–{start_port + 19}. "
-                    "Kill the existing dashboard process and retry."
-                )
+    target_port = port or config.agent.dashboard_port
+    server = ThreadingHTTPServer((host, target_port), _handler(storage, config, config_path))
+
+    # Record our PID so the *next* launch can cleanly replace us.
+    _write_dashboard_pid(config.storage_path)
 
     print(f"Signal Stream dashboard: http://{host}:{server.server_port}")
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        # Clean up PID file when the server exits normally.
+        _remove_dashboard_pid(config.storage_path)
 
 
 def _start_agent_run(config: SignalConfig, config_path: str) -> bool:
