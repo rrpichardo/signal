@@ -22,6 +22,10 @@ class OllamaClient:
     def __init__(self, config: SignalConfig):
         self.config = config.ollama
         self.last_error: str | None = None
+        # Raw assistant text from the most recent chat_json call. Captured so the
+        # Orchestrator (or anyone debugging) can log exactly what Ollama returned
+        # before our JSON parser touched it. Mirrors the last_error pattern.
+        self.last_response_text: str = ""
 
     @property
     def enabled(self) -> bool:
@@ -64,6 +68,9 @@ class OllamaClient:
         else:
             payload["format"] = "json"
 
+        # Reset the raw-response capture at the start of every call so a previous
+        # success doesn't bleed into the trace if this call fails mid-flight.
+        self.last_response_text = ""
         try:
             req = request.Request(
                 f"{self.config.host}/api/chat",
@@ -74,6 +81,9 @@ class OllamaClient:
             with request.urlopen(req, timeout=self.config.timeout_seconds) as response:
                 raw = json.loads(response.read().decode("utf-8"))
             content = raw.get("message", {}).get("content", "{}")
+            # Save the raw assistant text BEFORE parsing so debug traces still get
+            # something useful even if the model returned malformed JSON.
+            self.last_response_text = content
             parsed = json.loads(content)
         except (error.URLError, TimeoutError, json.JSONDecodeError, KeyError, ValueError) as exc:
             self.last_error = str(exc)
