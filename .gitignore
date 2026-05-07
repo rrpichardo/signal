@@ -7,3 +7,13 @@ outputs/
 dist/
 build/
 *.egg-info/
+
+# Frontend build artifacts — run `cd web && npm install && npm run build` to generate.
+web/node_modules/
+web/dist/
+web/.DS_Store
+web/tsconfig.tsbuildinfo
+web/tsconfig.node.tsbuildinfo
+web/vite.config.d.ts
+web/vite.config.js
+.DS_Store

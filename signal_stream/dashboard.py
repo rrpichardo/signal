@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import mimetypes
 import os
+import pathlib
 from pathlib import Path
 import signal
 import threading
@@ -57,6 +59,27 @@ def _write_dashboard_pid(storage_path: str) -> None:
 def _remove_dashboard_pid(storage_path: str) -> None:
     """Remove the PID file on clean shutdown."""
     _pid_path(storage_path).unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# React/Vite static file serving helpers.
+# ---------------------------------------------------------------------------
+
+# Allowed extensions when serving files from web/dist/assets/.
+# Kept tight so the handler can't accidentally serve .py or .toml files.
+_ALLOWED_EXTENSIONS = {".js", ".css", ".svg", ".png", ".ico", ".woff", ".woff2", ".map", ".txt"}
+
+
+def _static_dist() -> pathlib.Path:
+    """Return the path to web/dist relative to the repo root.
+
+    Plain English: walk up from dashboard.py (signal_stream/) to the repo root,
+    then append web/dist.  This works however the package is installed because
+    __file__ is always the real file on disk.
+    """
+    # __file__ is  <repo>/signal_stream/dashboard.py  →  parents[1] is <repo>/
+    repo_root = pathlib.Path(__file__).resolve().parents[1]
+    return repo_root / "web" / "dist"
 
 
 def dashboard_settings(config: SignalConfig) -> dict[str, object]:
@@ -138,9 +161,58 @@ def _handler(storage: SignalStorage, config: SignalConfig, config_path: str = "c
     class DashboardHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 - stdlib method name.
             path = urlparse(self.path).path
-            if path == "/":
-                self._send("text/html; charset=utf-8", DASHBOARD_HTML)
+            dist = _static_dist()
+
+            # --- Static asset serving (only when web/dist/ exists) ----------
+            if dist.is_dir():
+                # Serve hashed asset files from web/dist/assets/*.
+                # Path traversal guard: reject any segment that is ".." so a
+                # crafted URL like /assets/../../signal_stream/models.py can't
+                # escape the dist directory.
+                if path.startswith("/assets/") or path in ("/favicon.svg", "/favicon.ico", "/vite.svg"):
+                    # Resolve the file path inside dist without following symlinks.
+                    rel = path.lstrip("/")
+                    if ".." in rel.split("/"):
+                        self.send_response(403)
+                        self.end_headers()
+                        return
+                    file_path = dist / rel
+                    ext = file_path.suffix.lower()
+                    if ext not in _ALLOWED_EXTENSIONS or not file_path.is_file():
+                        self.send_response(404)
+                        self.end_headers()
+                        return
+                    data = file_path.read_bytes()
+                    mime = mimetypes.types_map.get(ext, "application/octet-stream")
+                    self.send_response(200)
+                    self.send_header("Content-Type", mime)
+                    self.send_header("Content-Length", str(len(data)))
+                    # Hashed asset files can be cached indefinitely; index.html never.
+                    self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
+
+                # SPA fallback: serve index.html for every non-API path so
+                # react-router deep links survive a hard reload.
+                if not path.startswith("/api/"):
+                    index = dist / "index.html"
+                    if index.is_file():
+                        data = index.read_bytes()
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/html; charset=utf-8")
+                        self.send_header("Content-Length", str(len(data)))
+                        self.send_header("Cache-Control", "no-cache")
+                        self.end_headers()
+                        self.wfile.write(data)
+                        return
+
+            # --- Legacy dashboard (served when web/dist/ is absent) ----------
+            if path == "/" and not dist.is_dir():
+                self._send("text/html; charset=utf-8", LEGACY_DASHBOARD_HTML)
                 return
+
+            # --- JSON API routes (unchanged) ---------------------------------
             if path == "/api/run/latest":
                 run = storage.latest_agent_run() or {}
                 self._json(run)
@@ -222,7 +294,8 @@ def _handler(storage: SignalStorage, config: SignalConfig, config_path: str = "c
     return DashboardHandler
 
 
-DASHBOARD_HTML = """<!doctype html>
+# Kept as a safety net — served when web/dist/ hasn't been built yet.
+LEGACY_DASHBOARD_HTML = """<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">

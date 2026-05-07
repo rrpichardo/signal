@@ -1,0 +1,138 @@
+/* Source Serif 4 carries the editorial register; Inter is UI; JetBrains Mono is for raw payloads. */
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600;8..60,700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* Light theme: warm off-white background, deep neutral foreground, vermilion accent.
+     The whole palette is HSL so Tailwind's color tokens (defined in tailwind.config.ts)
+     can flip light↔dark by toggling a single class on <html>. */
+  :root {
+    --background: 36 33% 98%;
+    --foreground: 220 13% 12%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 220 13% 12%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 13% 12%;
+
+    --muted: 220 14% 94%;
+    --muted-foreground: 220 9% 36%;
+
+    --accent: 16 84% 47%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 72% 45%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 220 13% 91%;
+    --input: 220 13% 91%;
+    --ring: 16 84% 47%;
+
+    /* Urgency tokens — same scale across themes, just different lightness. */
+    --urgency-critical: 0 72% 45%;
+    --urgency-high: 24 90% 50%;
+    --urgency-medium: 40 88% 45%;
+    --urgency-low: 220 9% 46%;
+
+    /* Editorial radius is small; bubbly corners feel like a web app, not a brief. */
+    --radius: 6px;
+  }
+
+  /* Dark theme: deep blue-black ground, warm off-white text. The accent is lifted
+     in lightness so the vermilion still reads as a deliberate editorial choice
+     rather than an alert color. */
+  .dark {
+    --background: 220 16% 8%;
+    --foreground: 36 25% 92%;
+
+    --card: 220 14% 11%;
+    --card-foreground: 36 25% 92%;
+
+    --popover: 220 14% 11%;
+    --popover-foreground: 36 25% 92%;
+
+    --muted: 220 12% 18%;
+    --muted-foreground: 220 9% 70%;
+
+    --accent: 18 90% 60%;
+    --accent-foreground: 220 16% 8%;
+
+    --destructive: 0 80% 62%;
+    --destructive-foreground: 220 16% 8%;
+
+    --border: 220 12% 22%;
+    --input: 220 12% 22%;
+    --ring: 18 90% 60%;
+
+    --urgency-critical: 0 80% 62%;
+    --urgency-high: 24 90% 60%;
+    --urgency-medium: 40 90% 58%;
+    --urgency-low: 220 9% 60%;
+  }
+
+  /* Apply the tokens globally and keep antialiasing consistent across platforms. */
+  * {
+    @apply border-border;
+  }
+  html {
+    @apply bg-background text-foreground;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    @apply font-sans;
+    font-feature-settings: "ss01", "cv11";
+  }
+
+  /* Selection picks up the accent so the editorial color is reinforced as users read. */
+  ::selection {
+    background: hsl(var(--accent) / 0.25);
+    color: hsl(var(--foreground));
+  }
+}
+
+@layer components {
+  /* Article-body prose: serif, slightly looser leading, comfortable measure.
+     Used in SignalDetailPage so long-form content feels like a real read. */
+  .prose-editorial {
+    @apply font-serif text-body text-foreground;
+  }
+  .prose-editorial p + p {
+    @apply mt-4;
+  }
+  .prose-editorial a {
+    @apply text-accent underline underline-offset-4 decoration-accent/40 hover:decoration-accent;
+  }
+
+  /* Tracked uppercase kicker — used above headlines and as section labels. */
+  .kicker {
+    @apply font-sans text-kicker uppercase font-semibold text-muted-foreground;
+  }
+
+  /* Hairline divider — preferred over card chrome in list views to keep the
+     feed reading like a printed page rather than a stack of widgets. */
+  .hairline {
+    @apply border-t border-border;
+  }
+}
+
+@layer utilities {
+  /* Two-line clamp for list items so dek text can flow without breaking the grid. */
+  .line-clamp-2 {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .line-clamp-3 {
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+}
