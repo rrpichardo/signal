@@ -7,6 +7,7 @@ import queue
 import subprocess
 import sys
 import threading
+import traceback
 from typing import Any
 
 from .llm import OllamaClient
@@ -34,6 +35,11 @@ class WorkerClient:
     M1 fix: stdout.readline() is wrapped in a thread + queue so the
     worker_timeout_seconds config value is actually enforced. Previously this
     call blocked forever if a worker hung, making the timeout setting a no-op.
+
+    M3 fix: stdin.write is also wrapped in a thread + join with timeout. A
+    multi-MB payload (e.g. 110 articles) easily exceeds the OS pipe buffer
+    (~16-64 KB on macOS); if the worker stalls before draining its stdin,
+    a naive write blocks the orchestrator forever with no timeout coverage.
     """
 
     def __init__(self, agent: str, config_path: str, timeout_seconds: int):
@@ -65,11 +71,49 @@ class WorkerClient:
         finally:
             self._q.put(None)
 
+    def _send_payload(self, payload: str, error_box: list[BaseException]) -> None:
+        """Write one task line to the worker's stdin from a helper thread."""
+        try:
+            assert self.proc.stdin is not None
+            self.proc.stdin.write(payload)
+            self.proc.stdin.flush()
+        except BaseException as exc:  # noqa: BLE001 - bubble through error_box.
+            # BrokenPipeError when the worker died, or anything else: capture
+            # so the caller can surface it instead of dying inside this thread.
+            error_box.append(exc)
+
     def request(self, task: dict[str, Any]) -> dict[str, Any]:
         if self.proc.stdin is None:
             raise AgentRuntimeError(f"{self.agent} worker stdin is unavailable.")
-        self.proc.stdin.write(json.dumps(task, sort_keys=True) + "\n")
-        self.proc.stdin.flush()
+
+        # Hand the write off to a thread so a stuck worker can't block the
+        # orchestrator past timeout_seconds. The reader was already async; now
+        # the write is too, giving full round-trip timeout coverage.
+        payload = json.dumps(task, sort_keys=True) + "\n"
+        write_error: list[BaseException] = []
+        writer = threading.Thread(
+            target=self._send_payload,
+            args=(payload, write_error),
+            daemon=True,
+            name=f"{self.agent}-writer",
+        )
+        writer.start()
+        writer.join(timeout=self.timeout_seconds)
+        if writer.is_alive():
+            # Worker stalled before draining stdin. Kill the subprocess so the
+            # blocked write unwinds with BrokenPipeError, then surface a clear
+            # error. The writer thread is daemon=True so it dies with the proc.
+            self.proc.kill()
+            raise AgentRuntimeError(
+                f"{self.agent} worker stalled accepting input after {self.timeout_seconds}s. "
+                "Consider raising worker_timeout_seconds in the config."
+            )
+        if write_error:
+            # Most commonly BrokenPipeError when the worker exited early.
+            raise AgentRuntimeError(
+                f"{self.agent} worker dropped before reading task: {write_error[0]}"
+            )
+
         try:
             line = self._q.get(timeout=self.timeout_seconds)
         except queue.Empty:
@@ -247,14 +291,40 @@ class SignalAgentRuntime:
             self.storage.save_agent_event(run_id, "Orchestrator", "finish", "Finished agent run.", {"output_path": output_path})
             _run_completed = True
             return {"run_id": run_id, "output_path": output_path, "articles": len(state["articles"]), "signals": len(signals)}
-        except BaseException:
+        except BaseException as exc:
             # Covers KeyboardInterrupt, SystemExit (SIGTERM handler), and unexpected exceptions.
             # Ensures the run row never stays stuck at status='running' after a crash.
             if not _run_completed:
+                # Build a human-readable reason from the exception itself so the
+                # dashboard can show WHY a run failed instead of just a red badge.
+                reason = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+                last_action = state["actions"][-1].get("action") if state["actions"] else None
+                # Drop an error event into the timeline FIRST so the failure is
+                # visible even if the row update below fails for any reason.
                 try:
-                    self.storage.finish_agent_run(run_id, "failed", {"reason": "interrupted"})
-                except Exception:
-                    pass
+                    self.storage.save_agent_event(
+                        run_id,
+                        "Orchestrator",
+                        "error",
+                        reason,
+                        {"traceback": traceback.format_exc(), "last_action": last_action},
+                    )
+                except Exception as event_exc:  # noqa: BLE001 - log and continue cleanup.
+                    print(
+                        f"[signal_stream] failed to log error event for {run_id}: {event_exc}",
+                        file=sys.stderr,
+                    )
+                try:
+                    self.storage.finish_agent_run(
+                        run_id,
+                        "failed",
+                        {"reason": reason, "last_action": last_action},
+                    )
+                except Exception as cleanup_exc:  # noqa: BLE001 - surface, don't swallow.
+                    print(
+                        f"[signal_stream] failed to mark {run_id} failed: {cleanup_exc}",
+                        file=sys.stderr,
+                    )
             raise
         finally:
             scout.close()

@@ -140,13 +140,39 @@ def serve_dashboard(
 
     signal.signal(signal.SIGTERM, _on_sigterm)
 
+    # Background sweeper: every minute, mark any 'running' row whose timeline
+    # has been silent for >5 minutes as failed. Catches orphaned runs whose
+    # cleanup path failed silently — without this, only a dashboard restart
+    # would unstick them. 5 minutes is well past worker_timeout_seconds (120s)
+    # so a healthy run is never swept by mistake.
+    _stop_sweeper = threading.Event()
+
+    def _sweep_loop() -> None:
+        while not _stop_sweeper.is_set():
+            try:
+                swept = storage.mark_runs_failed_if_idle(max_idle_seconds=300)
+                if swept:
+                    print(
+                        f"[signal_stream] swept {len(swept)} stale run(s): {', '.join(swept)}",
+                        flush=True,
+                    )
+            except Exception as exc:  # noqa: BLE001 - keep the sweeper alive across DB hiccups.
+                print(f"[signal_stream] sweeper error: {exc}", flush=True)
+            # Event.wait lets the sweeper exit promptly on shutdown instead of
+            # holding the process open for a full minute.
+            _stop_sweeper.wait(timeout=60)
+
+    threading.Thread(target=_sweep_loop, daemon=True, name="stale-run-sweeper").start()
+
     print(f"Signal Stream dashboard: http://{host}:{server.server_port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        # Also clean up on Ctrl+C / normal exit so no run stays 'running'.
+        # Stop the sweeper so the process can exit cleanly; mark any leftover
+        # in-flight runs failed; remove the PID file.
+        _stop_sweeper.set()
         storage.mark_stale_runs_failed()
         _remove_dashboard_pid(config.storage_path)
 
