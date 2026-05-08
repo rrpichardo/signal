@@ -81,7 +81,7 @@ DEFAULT_BEHAVIOR_SETTINGS: dict[str, Any] = {
     "analyst_review_limit": 8,
     "analyst_full_review": False,
     # Critic-loop defaults: opt-in. Existing runs keep the old three-agent shape.
-    "enable_critic": False,
+    "enable_critic": True,
     "max_critic_rounds": 1,
     "critic_score_threshold": 70,
 }

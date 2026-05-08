@@ -47,6 +47,16 @@ export function PromptsForm({ settings, onChange }: PromptsFormProps) {
           className="font-mono text-xs"
         />
       </FieldRow>
+
+      <FieldRow id="prompt_critic" label="Critic prompt" help="Reviews the digest after the Analyst; flags weak signals. Only used when Critic is enabled in Agent settings.">
+        <Textarea
+          id="prompt_critic"
+          rows={8}
+          value={prompts.critic ?? ""}
+          onChange={(e) => patch("critic", e.target.value)}
+          className="font-mono text-xs"
+        />
+      </FieldRow>
     </div>
   );
 }

@@ -17,3 +17,6 @@ web/tsconfig.node.tsbuildinfo
 web/vite.config.d.ts
 web/vite.config.js
 .DS_Store
+
+# Per-user Claude Code notes — never commit
+CLAUDE.local.md

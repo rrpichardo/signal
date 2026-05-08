@@ -78,6 +78,46 @@ export function AgentSettingsForm({ settings, onChange }: AgentSettingsFormProps
           onValueChange={([v]) => patch("model_score_adjustment_limit", v)}
         />
       </FieldRow>
+
+      <FieldRow id="enable_critic" label="Critic (reflection loop)" help="Critic reviews the Analyst's digest, scores it, and requests revisions until quality clears the threshold.">
+        <Select value={String(behavior.enable_critic === true)} onValueChange={(v) => patch("enable_critic", v === "true")}>
+          <SelectTrigger id="enable_critic"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="false">Disabled (skip Critic)</SelectItem>
+            <SelectItem value="true">Enabled</SelectItem>
+          </SelectContent>
+        </Select>
+      </FieldRow>
+
+      <FieldRow
+        id="max_critic_rounds"
+        label={`Max critic rounds — ${Number(behavior.max_critic_rounds ?? 1)}`}
+        help="How many revision loops before the Critic approves anyway."
+      >
+        <Slider
+          id="max_critic_rounds"
+          min={0}
+          max={5}
+          step={1}
+          value={[Number(behavior.max_critic_rounds ?? 1)]}
+          onValueChange={([v]) => patch("max_critic_rounds", v)}
+        />
+      </FieldRow>
+
+      <FieldRow
+        id="critic_score_threshold"
+        label={`Critic score threshold — ${Number(behavior.critic_score_threshold ?? 70)}`}
+        help="Digests scoring below this trigger a revision request (0–100)."
+      >
+        <Slider
+          id="critic_score_threshold"
+          min={0}
+          max={100}
+          step={5}
+          value={[Number(behavior.critic_score_threshold ?? 70)]}
+          onValueChange={([v]) => patch("critic_score_threshold", v)}
+        />
+      </FieldRow>
     </div>
   );
 }
