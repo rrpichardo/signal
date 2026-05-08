@@ -60,6 +60,14 @@ DEFAULT_SCORING_RUBRIC: dict[str, Any] = {
     ],
 }
 
+# Display preferences shown on the dashboard Digest page.
+# Editable via the Settings page (`[display]` block in agent_brain.toml).
+DEFAULT_DISPLAY_SETTINGS: dict[str, Any] = {
+    "page_size": 10,
+    "default_scope": "latest",
+}
+
+
 DEFAULT_BEHAVIOR_SETTINGS: dict[str, Any] = {
     "scout_mode": "hybrid",
     "analyst_mode": "hybrid",
@@ -163,6 +171,32 @@ def load_behavior_settings(path: str | Path | None) -> dict[str, Any]:
     return settings
 
 
+def load_display_settings(path: str | Path | None) -> dict[str, Any]:
+    """Load digest display preferences (page size, default scope) from the brain file.
+
+    Plain English: these are the dashboard knobs the user can change in the
+    Settings page to control how the digest list is displayed.
+    """
+
+    settings = dict(DEFAULT_DISPLAY_SETTINGS)
+    raw = _load_raw(path)
+    display = raw.get("display", {}) if raw else {}
+    if not isinstance(display, dict):
+        return settings
+
+    # page_size: must be a positive int within a sane range
+    if "page_size" in display:
+        try:
+            settings["page_size"] = max(1, min(100, int(display["page_size"])))
+        except (TypeError, ValueError):
+            pass
+    # default_scope: must be one of two known values
+    scope = str(display.get("default_scope", "")).strip().lower()
+    if scope in ("latest", "all"):
+        settings["default_scope"] = scope
+    return settings
+
+
 def load_brain_file(path: str | Path | None) -> dict[str, Any]:
     """Return everything the Settings screen needs in one friendly package."""
 
@@ -171,10 +205,12 @@ def load_brain_file(path: str | Path | None) -> dict[str, Any]:
         "prompts": load_prompt_set(path),
         "scoring": load_scoring_rubric(path),
         "behavior": load_behavior_settings(path),
+        "display": load_display_settings(path),
         "raw": _render_brain_toml(
             load_prompt_set(path),
             load_scoring_rubric(path),
             load_behavior_settings(path),
+            load_display_settings(path),
         )
         if not raw
         else Path(path).expanduser().resolve().read_text(encoding="utf-8"),
@@ -205,7 +241,22 @@ def save_brain_file(path: str | Path, brain: dict[str, Any]) -> None:
 
     behavior = dict(existing.get("behavior") or DEFAULT_BEHAVIOR_SETTINGS)
     behavior.update(dict(brain.get("behavior") or {}))
-    brain_path.write_text(_render_brain_toml(prompts, scoring, behavior), encoding="utf-8")
+
+    # Merge display preferences from existing file + incoming payload.
+    # Incoming values are validated (clamped) so a malformed POST cannot break the file.
+    display = dict(existing.get("display") or DEFAULT_DISPLAY_SETTINGS)
+    incoming_display = dict(brain.get("display") or {})
+    if "page_size" in incoming_display:
+        try:
+            display["page_size"] = max(1, min(100, int(incoming_display["page_size"])))
+        except (TypeError, ValueError):
+            pass
+    if "default_scope" in incoming_display:
+        scope = str(incoming_display["default_scope"]).strip().lower()
+        if scope in ("latest", "all"):
+            display["default_scope"] = scope
+
+    brain_path.write_text(_render_brain_toml(prompts, scoring, behavior, display), encoding="utf-8")
 
 
 def save_raw_brain_file(path: str | Path, raw_text: str) -> None:
@@ -239,7 +290,12 @@ def _merge_int_section(target: dict[str, Any], overrides: Any) -> None:
             continue
 
 
-def _render_brain_toml(prompts: dict[str, str], scoring: dict[str, Any], behavior: dict[str, Any]) -> str:
+def _render_brain_toml(
+    prompts: dict[str, str],
+    scoring: dict[str, Any],
+    behavior: dict[str, Any],
+    display: dict[str, Any] | None = None,
+) -> str:
     lines = [
         "# Signal Stream Brain File",
         "#",
@@ -292,6 +348,22 @@ def _render_brain_toml(prompts: dict[str, str], scoring: dict[str, Any], behavio
     for phrase in scoring.get("low_value_phrases", []):
         lines.append(f'  "{_toml_text(phrase)}",')
     lines.extend(["]", ""])
+
+    # Display preferences for the dashboard digest. Editable via Settings page.
+    display_safe = dict(DEFAULT_DISPLAY_SETTINGS)
+    if isinstance(display, dict):
+        display_safe.update({k: v for k, v in display.items() if k in DEFAULT_DISPLAY_SETTINGS})
+    lines.extend(
+        [
+            "[display]",
+            "# Dashboard display preferences. Edit here, save, and the digest reflects the new settings.",
+            "# page_size = number of signal cards shown per page (1-100).",
+            '# default_scope = "latest" or "all".',
+            f"page_size = {int(display_safe.get('page_size', 10))}",
+            f'default_scope = "{_toml_text(display_safe.get("default_scope", "latest"))}"',
+            "",
+        ]
+    )
     return "\n".join(lines)
 
 
