@@ -11,16 +11,48 @@ export function useLatestRun() {
   return useQuery({ queryKey: ["run/latest"], queryFn: api.latestRun, refetchInterval: LIVE_INTERVAL });
 }
 
-export function useSignals() {
-  return useQuery({ queryKey: ["signals"], queryFn: api.signals, refetchInterval: LIVE_INTERVAL });
+// Paged signals query. Live polling is enabled only on the first page of the
+// `latest` scope so deep archive pages don't flicker under the user while they
+// read. Older pages stay stable; the user refreshes manually if they want
+// updates from a new run.
+export function useSignals(params?: { scope?: "latest" | "all"; page?: number }) {
+  const scope = params?.scope ?? "latest";
+  const page = params?.page ?? 1;
+  const isLive = scope === "latest" && page === 1;
+  return useQuery({
+    queryKey: ["signals", scope, page],
+    queryFn: () => api.signals({ scope, page }),
+    refetchInterval: isLive ? LIVE_INTERVAL : false,
+  });
 }
 
-// Detail view filters the cached list rather than hitting a per-id endpoint
-// (the backend exposes only the bulk list today). This keeps detail navigation
-// instant and avoids an extra round trip.
+// Detail lookup: fetch a wide window (all-time, page 1, large page size) and
+// filter client-side. Avoids a per-id backend endpoint while still resolving
+// links to older signals that wouldn't appear on the latest-run page.
 export function useSignal(id: string | undefined) {
-  const query = useSignals();
-  return { ...query, data: query.data?.find((s) => s.id === id) };
+  const query = useQuery({
+    queryKey: ["signals", "detail-lookup"],
+    queryFn: () => api.signals({ scope: "all", page: 1, page_size: 100 }),
+  });
+  return { ...query, data: query.data?.items.find((s) => s.id === id) };
+}
+
+// Display preferences (page_size, default_scope) editable in Settings.
+// Cached without polling — these only change when the user saves.
+export function useDisplaySettings() {
+  return useQuery({ queryKey: ["display-settings"], queryFn: api.displaySettings });
+}
+
+export function useSaveDisplaySettings() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.saveDisplaySettings,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["display-settings"] });
+      // Force a re-fetch of any signals query keys since page_size may have changed.
+      qc.invalidateQueries({ queryKey: ["signals"] });
+    },
+  });
 }
 
 export function useEvents() {

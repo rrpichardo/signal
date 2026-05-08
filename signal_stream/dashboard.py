@@ -8,11 +8,17 @@ import pathlib
 from pathlib import Path
 import signal
 import threading
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from .agent_runtime import AgentRuntimeError, SignalAgentRuntime
 from .models import SignalConfig
-from .prompt_loader import load_brain_file, save_brain_file, save_raw_brain_file
+from .prompt_loader import (
+    DEFAULT_DISPLAY_SETTINGS,
+    load_brain_file,
+    load_display_settings,
+    save_brain_file,
+    save_raw_brain_file,
+)
 from .storage import SignalStorage
 
 # ---------------------------------------------------------------------------
@@ -226,7 +232,53 @@ def _handler(storage: SignalStorage, config: SignalConfig, config_path: str = "c
                 self._json(storage.tool_calls(run.get("id"), limit=250) if run else [])
                 return
             if path == "/api/signals":
-                self._json(storage.list_signals(limit=25))
+                # Parse query string for paged + scoped digest list:
+                #   scope=latest -> only signals from the most recent run
+                #   scope=all    -> every signal across all runs
+                #   page, page_size -> pagination knobs (page_size respects display settings if absent)
+                qs = parse_qs(urlparse(self.path).query)
+                scope = (qs.get("scope", ["latest"])[0] or "latest").lower()
+                if scope not in ("latest", "all"):
+                    scope = "latest"
+
+                display = load_display_settings(config.agent.brain_file)
+                try:
+                    page = max(1, int(qs.get("page", ["1"])[0]))
+                except (TypeError, ValueError):
+                    page = 1
+                try:
+                    page_size = int(qs.get("page_size", [str(display["page_size"])])[0])
+                except (TypeError, ValueError):
+                    page_size = int(display["page_size"])
+                page_size = max(1, min(100, page_size))
+
+                # When scope=latest, use the most recent run's started_at as the cursor.
+                run_started_at = None
+                run_info = None
+                if scope == "latest":
+                    run = storage.latest_run()
+                    if run:
+                        run_started_at = run["started_at"]
+                        run_info = {
+                            "id": run["id"],
+                            "started_at": run["started_at"],
+                            "completed_at": run["completed_at"],
+                            "signal_count": run["signal_count"],
+                        }
+
+                result = storage.list_signals_paged(
+                    run_started_at=run_started_at,
+                    page=page,
+                    page_size=page_size,
+                )
+                result["scope"] = scope
+                result["run"] = run_info
+                self._json(result)
+                return
+            if path == "/api/display-settings":
+                # Returns the user-editable display preferences as a small JSON
+                # object so the frontend can default-select scope and page size.
+                self._json(load_display_settings(config.agent.brain_file))
                 return
             if path == "/api/memory":
                 self._json(storage.list_memory(limit=25))
@@ -259,6 +311,21 @@ def _handler(storage: SignalStorage, config: SignalConfig, config_path: str = "c
                 if path == "/api/brain":
                     save_raw_brain_file(config.agent.brain_file, str(payload.get("raw", "")))
                     self._json({"status": "ok", "brain": load_brain_file(config.agent.brain_file)})
+                    return
+                if path == "/api/display-settings":
+                    # Persist display preferences. We piggyback on the brain-file save
+                    # path so the [display] block stays in agent_brain.toml alongside
+                    # the other Settings the user edits.
+                    save_brain_file(
+                        config.agent.brain_file,
+                        {"display": dict(payload or {})},
+                    )
+                    self._json(
+                        {
+                            "status": "ok",
+                            "display": load_display_settings(config.agent.brain_file),
+                        }
+                    )
                     return
             except Exception as exc:  # noqa: BLE001 - dashboard should report save errors as JSON.
                 self.send_response(400)

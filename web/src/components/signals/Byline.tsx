@@ -1,5 +1,5 @@
 import { ExternalLink } from "lucide-react";
-import { relativeTime } from "@/lib/format";
+import { relativeTime, signalDate } from "@/lib/format";
 
 interface BylineProps {
   source: string;
@@ -7,13 +7,19 @@ interface BylineProps {
   url?: string;
 }
 
-// Source · time · external link. Used both on list items and detail headers.
+// Source · absolute-date · external link. Used both on list items and detail headers.
+// The absolute date is primary; relative time appears in a hover tooltip
+// (so a reader instantly sees "May 3, 2026" but can still get "5 days ago" on hover).
+// signalDate returns "" when the date is missing or unparseable, in which case
+// the date span is hidden entirely instead of rendering "Invalid Date".
 export function Byline({ source, publishedAt, url }: BylineProps) {
+  const dateLabel = signalDate(publishedAt);
+  const tooltip = relativeTime(publishedAt);
   return (
     <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-meta text-muted-foreground">
       <span className="font-medium text-foreground">{source}</span>
-      {publishedAt && <span aria-hidden>·</span>}
-      {publishedAt && <span>{relativeTime(publishedAt)}</span>}
+      {dateLabel && <span aria-hidden>·</span>}
+      {dateLabel && <span title={tooltip || undefined}>{dateLabel}</span>}
       {url && (
         <>
           <span aria-hidden>·</span>

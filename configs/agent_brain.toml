@@ -60,12 +60,14 @@ Add newly discovered entities when the code missed important companies, people, 
 
 Summary requirements — these are strict minimums, not suggestions:
 
-short_summary (3-4 concrete sentences, 70-120 words):
-  - Sentence 1: State exactly what happened and who did it. Use the company/product name. No vague openers.
-  - Sentence 2: Describe the specific capability, change, or development — not the category.
-  - Sentence 3: Give one concrete detail (a number, a comparison, a named feature, a real use case).
-  - Sentence 4 (optional): Note a direct consequence or competitive implication.
+# short_summary is the visible blurb on each digest card. ALWAYS write this — never leave it empty.
+short_summary (2-3 sentences, 40-80 words):
+  - Reader-facing editorial summary that highlights why this article is relevant to read.
+  - Sentence 1: What the article is about and what it argues, shows, or announces.
+  - Sentence 2: The specific insight, takeaway, or development a reader will get from it.
+  - Sentence 3 (optional): Why it is worth reading now — the timing hook or the audience it speaks to.
   - Do NOT start with "This article...", "This piece...", or a restatement of the title.
+  - Do NOT include scoring context, priority matching, or pipeline metadata.
 
 expanded_summary (5-8 sentences, 120-220 words):
   - Open with what happened and why now — timing, trigger, or context.
@@ -160,6 +162,14 @@ startup_signal = 14
 builder_tactic = 11
 industry_signal = 10
 general_signal = 8
+
+# Dashboard display preferences. Edit here, save, and the digest reflects the new settings.
+# page_size = number of signal cards shown per page in the dashboard (1-100).
+# default_scope = "latest" shows only signals from the most recent run on load,
+#                 "all" shows every signal across all runs.
+[display]
+page_size = 10
+default_scope = "latest"
 
 [scoring]
 # If an article looks like this kind of content, it gets a low-value penalty.

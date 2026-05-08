@@ -13,7 +13,8 @@ export function RunStatusPill() {
   const hasRun = run && "id" in run;
   const status = hasRun ? (run as { status: string }).status : "idle";
   const startedAt = hasRun ? (run as { started_at: string }).started_at : null;
-  const signalCount = signals?.length ?? 0;
+  // Use the paged response's `total` so the count is real, not the array length.
+  const signalCount = signals?.total ?? 0;
 
   return (
     <Link

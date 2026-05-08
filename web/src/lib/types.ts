@@ -82,6 +82,32 @@ export interface MemoryItem {
   created_at: string;
 }
 
+// Paged digest list response from /api/signals?scope=...&page=...&page_size=...
+// `run` is null when scope=all, or when the database has no completed runs yet.
+export interface SignalsRunInfo {
+  id: number;
+  started_at: string;
+  completed_at: string;
+  signal_count: number;
+}
+
+export interface SignalsResponse {
+  items: Signal[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+  scope: "latest" | "all";
+  run: SignalsRunInfo | null;
+}
+
+// User-editable display preferences from /api/display-settings.
+// Backed by the [display] block in agent_brain.toml.
+export interface DisplaySettings {
+  page_size: number;
+  default_scope: "latest" | "all";
+}
+
 // /api/settings returns the parsed brain TOML plus a "raw" string copy.
 // Shape matches load_brain_file() — defensive typing because brains evolve.
 export interface BrainSettings {

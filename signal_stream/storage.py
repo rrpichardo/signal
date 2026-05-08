@@ -241,6 +241,7 @@ class SignalStorage:
             )
 
     def list_signals(self, limit: int = 10) -> list[dict[str, Any]]:
+        # Legacy entry point kept for the CLI. New callers should use list_signals_paged().
         with self.connect() as conn:
             rows = conn.execute(
                 """
@@ -253,25 +254,90 @@ class SignalStorage:
                 """,
                 (limit,),
             ).fetchall()
-        items = []
-        for row in rows:
-            item = dict(row)
-            try:
-                item["score_breakdown"] = json.loads(item.pop("score_breakdown_json") or "[]")
-            except json.JSONDecodeError:
-                item["score_breakdown"] = []
-            try:
-                item["entities"] = json.loads(item.pop("entities_json") or "{}")
-            except json.JSONDecodeError:
-                item["entities"] = {}
-            item["short_summary"] = item.get("short_summary") or item.get("summary") or ""
-            item["expanded_summary"] = item.get("expanded_summary") or item.get("short_summary") or ""
-            item["icon_key"] = item.get("icon_key") or item.get("event_type") or "signal"
-            item["image_url"] = item.get("image_url") or ""
-            item["scout_note"] = item.get("scout_note") or ""
-            item["relevance_label"] = item.get("relevance_label") or "keep"
-            items.append(item)
-        return items
+        return [self._hydrate_signal_row(row) for row in rows]
+
+    def count_signals(self, run_started_at: str | None = None) -> int:
+        # When run_started_at is provided, only count signals produced in that run or later.
+        # The on-conflict upsert in save_run() refreshes created_at on every run, so this
+        # reliably identifies "signals produced in the latest run" without a schema change.
+        query = "select count(*) as n from signals"
+        params: list[Any] = []
+        if run_started_at:
+            query += " where created_at >= ?"
+            params.append(run_started_at)
+        with self.connect() as conn:
+            row = conn.execute(query, params).fetchone()
+        return int(row["n"]) if row else 0
+
+    def list_signals_paged(
+        self,
+        run_started_at: str | None = None,
+        page: int = 1,
+        page_size: int = 10,
+    ) -> dict[str, Any]:
+        # Paged signal listing. When run_started_at is set, restricts to signals
+        # produced in that run window (created_at >= run_started_at).
+        page = max(1, int(page))
+        page_size = max(1, min(int(page_size), 100))  # clamp page size to a safe range
+        offset = (page - 1) * page_size
+
+        total = self.count_signals(run_started_at=run_started_at)
+        total_pages = (total + page_size - 1) // page_size if total else 0
+
+        # Build the data query with optional WHERE clause for the run window
+        query = """
+            select id, title, score, urgency, event_type, source, published_at, summary, short_summary,
+                   expanded_summary, why_it_matters, url, score_breakdown_json, entities_json, image_url,
+                   icon_key, scout_note, relevance_label, created_at
+            from signals
+        """
+        params: list[Any] = []
+        if run_started_at:
+            query += " where created_at >= ?"
+            params.append(run_started_at)
+        query += " order by created_at desc, score desc limit ? offset ?"
+        params.extend([page_size, offset])
+
+        with self.connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+
+        return {
+            "items": [self._hydrate_signal_row(row) for row in rows],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+        }
+
+    def latest_run(self) -> dict[str, Any] | None:
+        # Most recent completed run from the runs table. Used as a cursor for
+        # "latest run" scope filtering on the digest page.
+        with self.connect() as conn:
+            row = conn.execute(
+                "select id, started_at, completed_at, article_count, cluster_count, "
+                "signal_count, output_path "
+                "from runs order by started_at desc limit 1"
+            ).fetchone()
+        return dict(row) if row else None
+
+    def _hydrate_signal_row(self, row: Any) -> dict[str, Any]:
+        # Shared post-processing for signal rows: parse JSON fields and apply UI fallbacks.
+        item = dict(row)
+        try:
+            item["score_breakdown"] = json.loads(item.pop("score_breakdown_json") or "[]")
+        except json.JSONDecodeError:
+            item["score_breakdown"] = []
+        try:
+            item["entities"] = json.loads(item.pop("entities_json") or "{}")
+        except json.JSONDecodeError:
+            item["entities"] = {}
+        item["short_summary"] = item.get("short_summary") or item.get("summary") or ""
+        item["expanded_summary"] = item.get("expanded_summary") or item.get("short_summary") or ""
+        item["icon_key"] = item.get("icon_key") or item.get("event_type") or "signal"
+        item["image_url"] = item.get("image_url") or ""
+        item["scout_note"] = item.get("scout_note") or ""
+        item["relevance_label"] = item.get("relevance_label") or "keep"
+        return item
 
     def load_priority_adjustments(self) -> dict[str, float]:
         with self.connect() as conn:

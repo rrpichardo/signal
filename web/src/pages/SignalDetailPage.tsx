@@ -15,10 +15,14 @@ import { ArrowLeft } from "lucide-react";
 export default function SignalDetailPage() {
   const { id } = useParams<{ id: string }>();
   const { data: signal, isLoading } = useSignal(id);
-  const { data: allSignals } = useSignals();
+  // Wide window so the related list pulls from a meaningful pool, not just the
+  // current digest page. useSignals now returns a paged response, so we read
+  // `.items` instead of treating the data as a flat array.
+  const { data: allSignals } = useSignals({ scope: "all", page: 1 });
 
   // Related signals share the same event_type but are not the current signal.
-  const related = allSignals?.filter((s) => s.event_type === signal?.event_type && s.id !== id) ?? [];
+  const related =
+    allSignals?.items.filter((s) => s.event_type === signal?.event_type && s.id !== id) ?? [];
 
   if (isLoading) {
     return (
