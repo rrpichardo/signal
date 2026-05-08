@@ -55,6 +55,19 @@ export function useSaveDisplaySettings() {
   });
 }
 
+export function useStartRun() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.startRun,
+    onSuccess: () => {
+      // Kick live queries immediately so the activity tab shows the new run.
+      qc.invalidateQueries({ queryKey: ["run/latest"] });
+      qc.invalidateQueries({ queryKey: ["events"] });
+      qc.invalidateQueries({ queryKey: ["tool-calls"] });
+    },
+  });
+}
+
 export function useEvents() {
   return useQuery({ queryKey: ["events"], queryFn: api.events, refetchInterval: LIVE_INTERVAL });
 }

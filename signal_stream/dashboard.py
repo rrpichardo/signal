@@ -131,11 +131,23 @@ def serve_dashboard(
     # Record our PID so the *next* launch can cleanly replace us.
     _write_dashboard_pid(config.storage_path)
 
+    # SIGTERM handler: mark any in-flight runs as failed then shut down cleanly.
+    # Without this, killing the dashboard process with SIGTERM leaves run rows
+    # stuck at status='running' forever.
+    def _on_sigterm(signum: int, frame: object) -> None:
+        storage.mark_stale_runs_failed()
+        server.shutdown()
+
+    signal.signal(signal.SIGTERM, _on_sigterm)
+
     print(f"Signal Stream dashboard: http://{host}:{server.server_port}")
     try:
         server.serve_forever()
+    except KeyboardInterrupt:
+        pass
     finally:
-        # Clean up PID file when the server exits normally.
+        # Also clean up on Ctrl+C / normal exit so no run stays 'running'.
+        storage.mark_stale_runs_failed()
         _remove_dashboard_pid(config.storage_path)
 
 

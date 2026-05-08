@@ -57,6 +57,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+  startRun: () =>
+    http<{ status: "started" | "already_running" }>("/api/run", {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
   saveSettings: (payload: Partial<BrainSettings>) =>
     http<{ status: string; settings: BrainSettings }>("/api/settings", {
       method: "POST",

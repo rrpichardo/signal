@@ -114,6 +114,7 @@ class SignalAgentRuntime:
         goal = goal or "Surface today's highest-signal AI/tech developments and prepare a digest."
         run_id = self.storage.start_agent_run(goal)
         self.storage.save_agent_event(run_id, "Orchestrator", "start", "Started local agent run.", {"goal": goal})
+        _run_completed = False
 
         if self.config.agent.require_ollama and not self.llm.available():
             message = self.llm.last_error or "Ollama is not available."
@@ -244,7 +245,17 @@ class SignalAgentRuntime:
                 {"articles": len(state["articles"]), "signals": len(signals), "output_path": output_path},
             )
             self.storage.save_agent_event(run_id, "Orchestrator", "finish", "Finished agent run.", {"output_path": output_path})
+            _run_completed = True
             return {"run_id": run_id, "output_path": output_path, "articles": len(state["articles"]), "signals": len(signals)}
+        except BaseException:
+            # Covers KeyboardInterrupt, SystemExit (SIGTERM handler), and unexpected exceptions.
+            # Ensures the run row never stays stuck at status='running' after a crash.
+            if not _run_completed:
+                try:
+                    self.storage.finish_agent_run(run_id, "failed", {"reason": "interrupted"})
+                except Exception:
+                    pass
+            raise
         finally:
             scout.close()
             analyst.close()
