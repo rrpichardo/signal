@@ -380,6 +380,15 @@ class SignalStorage:
                 (status, utc_now_iso(), json.dumps(summary or {}, sort_keys=True), run_id),
             )
 
+    def mark_stale_runs_failed(self) -> int:
+        """Mark any runs still in 'running' state as failed. Returns count updated."""
+        with self.connect() as conn:
+            cur = conn.execute(
+                "update agent_runs set status = 'failed', completed_at = ? where status = 'running'",
+                (utc_now_iso(),),
+            )
+            return cur.rowcount
+
     def save_agent_event(self, run_id: str, agent: str, event_type: str, message: str, payload: dict[str, Any] | None = None) -> None:
         with self.connect() as conn:
             conn.execute(

@@ -36,6 +36,15 @@ ANALYST_REVIEW_SCHEMA = {
     "required": ["signals"],
 }
 
+SUMMARY_REPAIR_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "short_summary": {"type": "string"},
+        "expanded_summary": {"type": "string"},
+    },
+    "required": ["short_summary", "expanded_summary"],
+}
+
 
 def analyze_articles(
     config: SignalConfig,
@@ -105,7 +114,7 @@ def analyze_articles(
         )
         signals.append(signal)
         review_context[signal.id] = {
-            "article_text": article.body[:4500],
+            "article_text": article.body[:2500],
             "scout_topic": article.raw.get("scout_topic", ""),
             "scout_signal_type": article.raw.get("scout_signal_type", ""),
             "scout_usefulness": article.raw.get("scout_usefulness", ""),
@@ -113,6 +122,9 @@ def analyze_articles(
             "relevance_label": article.raw.get("scout_relevance_label", "keep"),
         }
 
+    # Sort before the model pass so the dashboard's most visible cards get
+    # model-written summaries first.
+    signals.sort(key=lambda item: item.score, reverse=True)
     signals = _apply_analyst_mode(signals, config, analyst_mode, analyst_prompt, behavior, review_context)
     signals.sort(key=lambda item: item.score, reverse=True)
     digest = render_digest(config, signals, trace.events)
@@ -260,54 +272,34 @@ def _apply_analyst_mode(
     if not llm.available():
         return signals
 
-    payload = {
-        "task": "review_ranked_signals",
-        "signals": [
-            {
-                "id": signal.id,
-                "title": signal.title,
-                "source": signal.source,
-                "event_type": signal.event_type,
-                "score": signal.score,
-                "score_breakdown": signal.score_breakdown,
-                "matched_priorities": signal.matched_priorities,
-                "entities": signal.entities,
-                "duplicate_count": signal.duplicate_count,
-                "short_summary": signal.short_summary or signal.summary,
-                "expanded_summary": signal.expanded_summary or signal.summary,
-                "why_it_matters": signal.why_it_matters,
-                "article_text": review_context.get(signal.id, {}).get("article_text", ""),
-                "scout_context": {
-                    "topic": review_context.get(signal.id, {}).get("scout_topic", ""),
-                    "signal_type": review_context.get(signal.id, {}).get("scout_signal_type", ""),
-                    "usefulness": review_context.get(signal.id, {}).get("scout_usefulness", ""),
-                    "note": review_context.get(signal.id, {}).get("scout_note", ""),
-                    "relevance_label": review_context.get(signal.id, {}).get("relevance_label", ""),
-                },
-            }
-            for signal in signals[:20]
-        ],
-        "rules": {
-            "score_adjustment_limit": int(behavior.get("model_score_adjustment_limit", 20)),
-            "summary_mode": behavior.get("summary_mode", "short_expanded"),
-            "entity_extraction": behavior.get("entity_extraction", "hybrid"),
-        },
-    }
-    raw = llm.chat_json(analyst_prompt, json.dumps(payload, sort_keys=True), ANALYST_REVIEW_SCHEMA)
-    if not raw:
-        return signals
-
-    reviewed = {item.get("id"): item for item in raw.get("signals", []) if item.get("id")}
+    # The focused summary repair is the default for local models because it is
+    # fast and directly handles the visible card paragraph. Full review can be
+    # turned on later from the brain file if a stronger model is available.
+    reviewed = _review_signals_in_chunks(llm, analyst_prompt, signals, behavior, review_context) if behavior.get("analyst_full_review") else {}
     updated = []
-    for signal in signals:
+    review_limit = int(behavior.get("analyst_review_limit", 30))
+    for index, signal in enumerate(signals):
         item = reviewed.get(signal.id)
         if not item:
+            if index < review_limit:
+                repaired = _repair_lazy_summary(llm, analyst_prompt, signal, review_context.get(signal.id, {}), behavior)
+                if repaired.get("short_summary"):
+                    signal.short_summary = repaired["short_summary"]
+                    signal.summary = signal.short_summary
+                if behavior.get("summary_mode") != "short_only" and repaired.get("expanded_summary"):
+                    signal.expanded_summary = repaired["expanded_summary"]
             updated.append(signal)
             continue
         model_score = int(item.get("score", signal.score))
         merged_score = _bounded_model_score(signal.score, model_score, analyst_mode, int(behavior.get("model_score_adjustment_limit", 20)))
         signal.score = max(0, min(100, merged_score))
-        signal.short_summary = normalize_space(item.get("short_summary", signal.short_summary or signal.summary)) or signal.short_summary or signal.summary
+        model_short = normalize_space(item.get("short_summary", ""))
+        if _looks_like_lazy_summary(model_short, signal.title):
+            repaired = _repair_lazy_summary(llm, analyst_prompt, signal, review_context.get(signal.id, {}), behavior)
+            model_short = repaired.get("short_summary", "")
+            if behavior.get("summary_mode") != "short_only" and repaired.get("expanded_summary"):
+                signal.expanded_summary = repaired["expanded_summary"]
+        signal.short_summary = model_short or signal.short_summary or signal.summary
         if behavior.get("summary_mode") == "short_only":
             signal.expanded_summary = ""
         else:
@@ -318,6 +310,119 @@ def _apply_analyst_mode(
         signal.urgency = _urgency(signal.score, config.critical_threshold)
         updated.append(signal)
     return updated
+
+
+def _review_signals_in_chunks(
+    llm: OllamaClient,
+    analyst_prompt: str,
+    signals: list[Signal],
+    behavior: dict[str, Any],
+    review_context: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Review top signals in small model calls.
+
+    Plain English: local models struggle with giant prompts. Smaller batches are
+    slower than one huge request, but much more likely to actually produce the
+    model-written summaries we want.
+    """
+
+    limit = int(behavior.get("analyst_review_limit", 30))
+    candidates = signals[:limit]
+    reviewed: dict[str, dict[str, Any]] = {}
+    for index in range(0, len(candidates), 5):
+        chunk = candidates[index : index + 5]
+        payload = {
+            "task": "review_ranked_signals",
+            "signals": [_review_payload(signal, review_context.get(signal.id, {})) for signal in chunk],
+            "rules": {
+                "score_adjustment_limit": int(behavior.get("model_score_adjustment_limit", 20)),
+                "summary_mode": behavior.get("summary_mode", "short_expanded"),
+                "entity_extraction": behavior.get("entity_extraction", "hybrid"),
+                "short_summary_owner": "model",
+                "short_summary_instruction": "Write a fresh 2-3 sentence card summary from article_text. Do not repeat the title. Do not copy the opening sentence. Use plain English.",
+            },
+        }
+        raw = llm.chat_json(analyst_prompt, json.dumps(payload, sort_keys=True), ANALYST_REVIEW_SCHEMA)
+        if not raw:
+            continue
+        for item in raw.get("signals", []):
+            if item.get("id"):
+                reviewed[item["id"]] = item
+    return reviewed
+
+
+def _review_payload(signal: Signal, context: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": signal.id,
+        "title": signal.title,
+        "source": signal.source,
+        "event_type": signal.event_type,
+        "score": signal.score,
+        "score_breakdown": signal.score_breakdown,
+        "matched_priorities": signal.matched_priorities,
+        "entities": signal.entities,
+        "duplicate_count": signal.duplicate_count,
+        "why_it_matters": signal.why_it_matters,
+        "article_text": str(context.get("article_text", ""))[:1800],
+        "source_facts": {
+            "title": signal.title,
+            "source": signal.source,
+            "event_type": signal.event_type,
+            "published_at": signal.published_at,
+            "score_breakdown": signal.score_breakdown,
+        },
+        "scout_context": {
+            "topic": context.get("scout_topic", ""),
+            "signal_type": context.get("scout_signal_type", ""),
+            "usefulness": context.get("scout_usefulness", ""),
+            "note": context.get("scout_note", ""),
+            "relevance_label": context.get("relevance_label", ""),
+        },
+    }
+
+
+def _repair_lazy_summary(
+    llm: OllamaClient,
+    analyst_prompt: str,
+    signal: Signal,
+    context: dict[str, Any],
+    behavior: dict[str, Any],
+) -> dict[str, str]:
+    """Ask the model again when the first card summary just copied source text.
+
+    Plain English: the card paragraph is supposed to be written by the model.
+    If the batch review gets lazy, this smaller second prompt gives the model a
+    cleaner job: write only the summaries from the article text.
+    """
+
+    article_text = str(context.get("article_text", ""))
+    if not article_text:
+        return {}
+    user = json.dumps(
+        {
+            "task": "write_model_owned_signal_summary",
+            "title": signal.title,
+            "source": signal.source,
+            "event_type": signal.event_type,
+            "article_text": article_text,
+            "rules": {
+                "short_summary": "Write 2-3 plain-English sentences. Do not repeat the title. Do not copy the article opening.",
+                "expanded_summary": "Write up to two short paragraphs unless summary_mode is short_only.",
+                "summary_mode": behavior.get("summary_mode", "short_expanded"),
+            },
+        },
+        sort_keys=True,
+    )
+    raw = llm.chat_json(analyst_prompt, user, SUMMARY_REPAIR_SCHEMA)
+    if not raw:
+        return {}
+    short = normalize_space(raw.get("short_summary", ""))
+    if _looks_like_lazy_summary(short, signal.title):
+        return {}
+    return {
+        "short_summary": short,
+        "expanded_summary": normalize_space(raw.get("expanded_summary", "")),
+    }
 
 
 def _base_score_card(
@@ -426,6 +531,39 @@ def _low_value_reason(article: Article, scoring_rubric: dict[str, Any]) -> str:
 
 def _score_line(name: str, points: int, reason: str) -> dict[str, Any]:
     return {"name": name, "points": int(points), "reason": reason}
+
+
+def _looks_like_lazy_summary(summary: str, title: str) -> bool:
+    """Catch model outputs that just echo the title or scraped opening.
+
+    Plain English: the short card paragraph should read like an analyst wrote
+    it. If it starts by repeating the headline, we keep the fallback instead of
+    pretending that was a real model summary.
+    """
+
+    cleaned = normalize_space(summary).lower()
+    title_cleaned = normalize_space(title).lower()
+    if not cleaned:
+        return True
+    if title_cleaned and cleaned.startswith(title_cleaned[: min(50, len(title_cleaned))]):
+        return True
+    return len(cleaned.split()) > 90
+
+
+def _rough_summary(text: str) -> str:
+    """Fallback summary used only when the model cannot review the signal.
+
+    Plain English: in hybrid/model mode, Ollama owns the final short summary.
+    This rough version keeps the app usable if the local model is unavailable.
+    """
+
+    return first_sentences(text, max_sentences=2)
+
+
+def _rough_expanded_summary(text: str) -> str:
+    """Fallback expanded summary for model-off or model-failure runs."""
+
+    return first_sentences(text, max_sentences=6, max_chars=1200)
 
 
 def _bounded_model_score(base_score: int, model_score: int, analyst_mode: str, limit: int) -> int:

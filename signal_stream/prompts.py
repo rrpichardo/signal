@@ -33,7 +33,7 @@ Your job is to deduplicate, check memory, score signal value, identify themes, a
 Be harsh. Cut weak articles. Explain why each included item matters.
 You will receive a code-generated score breakdown. Treat it as the baseline rubric, not as gospel.
 Use the breakdown to understand why the base score exists, then adjust only when the article meaning clearly deserves it.
-Write short summaries, expanded summaries, why-it-matters text, and add newly discovered entities when useful.
+Write the short card summary yourself from article text. Do not repeat the headline or copy the article's first sentence. Also write expanded summaries, why-it-matters text, and add newly discovered entities when useful.
 Return structured JSON only.
 """.strip()
 

@@ -131,11 +131,23 @@ def serve_dashboard(
     # Record our PID so the *next* launch can cleanly replace us.
     _write_dashboard_pid(config.storage_path)
 
+    # SIGTERM handler: mark any in-flight runs as failed then shut down cleanly.
+    # Without this, killing the dashboard process with SIGTERM leaves run rows
+    # stuck at status='running' forever.
+    def _on_sigterm(signum: int, frame: object) -> None:
+        storage.mark_stale_runs_failed()
+        server.shutdown()
+
+    signal.signal(signal.SIGTERM, _on_sigterm)
+
     print(f"Signal Stream dashboard: http://{host}:{server.server_port}")
     try:
         server.serve_forever()
+    except KeyboardInterrupt:
+        pass
     finally:
-        # Clean up PID file when the server exits normally.
+        # Also clean up on Ctrl+C / normal exit so no run stays 'running'.
+        storage.mark_stale_runs_failed()
         _remove_dashboard_pid(config.storage_path)
 
 
@@ -457,6 +469,10 @@ LEGACY_DASHBOARD_HTML = """<!doctype html>
           <select id="relevance_policy"><option value="soft_keep">soft keep borderline items</option><option value="hard_drop">hard drop model-labeled drop items</option></select>
           <label>Model score adjustment limit <small>(hybrid mode only — caps how much the LLM can swing the base score)</small></label>
           <input id="model_score_adjustment_limit" type="number" min="0" max="100">
+          <label>Analyst review limit</label>
+          <input id="analyst_review_limit" type="number" min="1" max="100">
+          <label>Full Analyst review</label>
+          <select id="analyst_full_review"><option value="false">off for faster local runs</option><option value="true">on for stronger models</option></select>
           <label>Repeat penalty strength</label>
           <select id="repeat_penalty_strength"><option>light</option><option>medium</option><option>strong</option></select>
 
@@ -616,6 +632,8 @@ LEGACY_DASHBOARD_HTML = """<!doctype html>
       }
       document.getElementById('scout_note_enabled').value = String(b.scout_note_enabled !== false);
       document.getElementById('model_score_adjustment_limit').value = b.model_score_adjustment_limit || 20;
+      document.getElementById('analyst_review_limit').value = b.analyst_review_limit || 8;
+      document.getElementById('analyst_full_review').value = String(b.analyst_full_review === true);
       // Critic-loop knobs (default off / 1 round / threshold 70 if missing).
       document.getElementById('enable_critic').value = String(b.enable_critic === true);
       document.getElementById('max_critic_rounds').value = b.max_critic_rounds != null ? b.max_critic_rounds : 1;
@@ -639,6 +657,8 @@ LEGACY_DASHBOARD_HTML = """<!doctype html>
           relevance_policy: document.getElementById('relevance_policy').value,
           scout_note_enabled: document.getElementById('scout_note_enabled').value === 'true',
           model_score_adjustment_limit: Number(document.getElementById('model_score_adjustment_limit').value || 20),
+          analyst_review_limit: Number(document.getElementById('analyst_review_limit').value || 8),
+          analyst_full_review: document.getElementById('analyst_full_review').value === 'true',
           summary_mode: document.getElementById('summary_mode').value,
           visuals_mode: document.getElementById('visuals_mode').value,
           repeat_penalty_strength: document.getElementById('repeat_penalty_strength').value,

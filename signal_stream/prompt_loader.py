@@ -78,6 +78,8 @@ DEFAULT_BEHAVIOR_SETTINGS: dict[str, Any] = {
     "visuals_mode": "image_icon",
     "repeat_penalty_strength": "strong",
     "entity_extraction": "hybrid",
+    "analyst_review_limit": 8,
+    "analyst_full_review": False,
     # Critic-loop defaults: opt-in. Existing runs keep the old three-agent shape.
     "enable_critic": False,
     "max_critic_rounds": 1,
@@ -150,9 +152,16 @@ def load_behavior_settings(path: str | Path | None) -> dict[str, Any]:
             settings[key] = value
     if "scout_note_enabled" in behavior:
         settings["scout_note_enabled"] = bool(behavior.get("scout_note_enabled"))
+    if "analyst_full_review" in behavior:
+        settings["analyst_full_review"] = bool(behavior.get("analyst_full_review"))
     if "model_score_adjustment_limit" in behavior:
         try:
             settings["model_score_adjustment_limit"] = max(0, min(100, int(behavior["model_score_adjustment_limit"])))
+        except (TypeError, ValueError):
+            pass
+    if "analyst_review_limit" in behavior:
+        try:
+            settings["analyst_review_limit"] = max(1, min(100, int(behavior["analyst_review_limit"])))
         except (TypeError, ValueError):
             pass
     # Critic-loop switches: bool toggle and two bounded integers.
@@ -318,6 +327,8 @@ def _render_brain_toml(
             f'relevance_policy = "{_toml_text(behavior.get("relevance_policy", "soft_keep"))}"',
             f"scout_note_enabled = {_toml_bool(behavior.get('scout_note_enabled', True))}",
             f"model_score_adjustment_limit = {int(behavior.get('model_score_adjustment_limit', 20))}",
+            f"analyst_review_limit = {int(behavior.get('analyst_review_limit', 8))}",
+            f"analyst_full_review = {_toml_bool(behavior.get('analyst_full_review', False))}",
             f'summary_mode = "{_toml_text(behavior.get("summary_mode", "short_expanded"))}"',
             f'visuals_mode = "{_toml_text(behavior.get("visuals_mode", "image_icon"))}"',
             f'repeat_penalty_strength = "{_toml_text(behavior.get("repeat_penalty_strength", "strong"))}"',

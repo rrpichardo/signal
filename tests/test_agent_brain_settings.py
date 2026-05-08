@@ -4,10 +4,10 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from signal_stream.analysis_tools import _base_score_card, _bounded_model_score
+from signal_stream.analysis_tools import _apply_analyst_mode, _base_score_card, _bounded_model_score, _looks_like_lazy_summary
 from signal_stream.config import load_config
 from signal_stream.dashboard import dashboard_settings, save_dashboard_settings
-from signal_stream.models import Article
+from signal_stream.models import Article, OllamaConfig, Priority, Signal, SignalConfig
 from signal_stream.prompt_loader import load_behavior_settings, load_brain_file, save_brain_file
 from signal_stream.source_tools import enrich_articles_with_model
 
@@ -29,6 +29,7 @@ class AgentBrainSettingsTest(unittest.TestCase):
             brain = load_brain_file(path)
             self.assertEqual(brain["behavior"]["relevance_policy"], "soft_keep")
             self.assertEqual(brain["behavior"]["model_score_adjustment_limit"], 20)
+            self.assertEqual(brain["behavior"]["analyst_review_limit"], 8)
             self.assertEqual(brain["prompts"]["scout"], "Scout test prompt")
             self.assertEqual(brain["scoring"]["max_points"]["repeat_penalty"], 30)
             self.assertIn("promo", brain["scoring"]["low_value_phrases"])
@@ -122,6 +123,232 @@ enabled = false
 
             self.assertEqual(saved["behavior"]["relevance_policy"], "hard_drop")
             self.assertEqual(load_behavior_settings(brain_path)["relevance_policy"], "hard_drop")
+
+    def test_hybrid_analyst_uses_model_owned_short_summary(self) -> None:
+        class FakeOllama:
+            def __init__(self, config):  # noqa: ANN001
+                pass
+
+            def available(self) -> bool:
+                return True
+
+            def chat_json(self, system, user, schema):  # noqa: ANN001
+                self.last_payload = user
+                return {
+                    "signals": [
+                        {
+                            "id": "sig_1",
+                            "score": 70,
+                            "short_summary": "Model-written card paragraph for the reader.",
+                            "expanded_summary": "Model-written expanded summary for the detail view.",
+                            "why_it_matters": "Model-written strategic explanation.",
+                            "entities": {"companies": ["OpenAI"]},
+                        }
+                    ]
+                }
+
+        config = SignalConfig(
+            name="Test",
+            organization="Test",
+            audience="Reader",
+            mission="Test",
+            competitors=[],
+            markets=[],
+            priorities=[Priority("AI")],
+            sources=[],
+            storage_path=":memory:",
+            output_dir=".",
+            ollama=OllamaConfig(enabled=True),
+        )
+        signal = Signal(
+            id="sig_1",
+            cluster_id="cluster",
+            article_id="article",
+            title="Title",
+            url="",
+            source="Source",
+            published_at="",
+            score=60,
+            urgency="medium",
+            event_type="platform_shift",
+            summary="Code fallback.",
+            why_it_matters="Code fallback why.",
+            next_steps=[],
+            matched_priorities=[],
+            entities={},
+            short_summary="Code fallback.",
+            expanded_summary="Code fallback expanded.",
+        )
+
+        import signal_stream.analysis_tools as analysis_tools
+
+        original = analysis_tools.OllamaClient
+        analysis_tools.OllamaClient = FakeOllama
+        try:
+            updated = _apply_analyst_mode(
+                [signal],
+                config,
+                "hybrid",
+                "prompt",
+                {"model_score_adjustment_limit": 20, "summary_mode": "short_expanded", "entity_extraction": "hybrid", "analyst_full_review": True},
+                {"sig_1": {"article_text": "Full article text for the model."}},
+            )[0]
+        finally:
+            analysis_tools.OllamaClient = original
+
+        self.assertEqual(updated.short_summary, "Model-written card paragraph for the reader.")
+        self.assertEqual(updated.summary, updated.short_summary)
+        self.assertEqual(updated.expanded_summary, "Model-written expanded summary for the detail view.")
+
+    def test_lazy_model_summary_gets_repaired_by_second_model_call(self) -> None:
+        class FakeOllama:
+            def __init__(self, config):  # noqa: ANN001
+                self.calls = 0
+
+            def available(self) -> bool:
+                return True
+
+            def chat_json(self, system, user, schema):  # noqa: ANN001
+                self.calls += 1
+                if self.calls == 1:
+                    return {
+                        "signals": [
+                            {
+                                "id": "sig_1",
+                                "score": 70,
+                                "short_summary": "Big AI Launch: Big AI Launch details copied from the title.",
+                                "expanded_summary": "Copied expanded summary.",
+                                "why_it_matters": "Model why.",
+                                "entities": {},
+                            }
+                        ]
+                    }
+                return {
+                    "short_summary": "The launch gives developers a clearer way to evaluate agent workflows before production.",
+                    "expanded_summary": "The launch gives developers a clearer way to evaluate agent workflows before production. It matters because teams can compare reliability and cost before committing.",
+                }
+
+        config = SignalConfig(
+            name="Test",
+            organization="Test",
+            audience="Reader",
+            mission="Test",
+            competitors=[],
+            markets=[],
+            priorities=[Priority("AI")],
+            sources=[],
+            storage_path=":memory:",
+            output_dir=".",
+            ollama=OllamaConfig(enabled=True),
+        )
+        signal = Signal(
+            id="sig_1",
+            cluster_id="cluster",
+            article_id="article",
+            title="Big AI Launch",
+            url="",
+            source="Source",
+            published_at="",
+            score=60,
+            urgency="medium",
+            event_type="platform_shift",
+            summary="Code fallback.",
+            why_it_matters="Code fallback why.",
+            next_steps=[],
+            matched_priorities=[],
+            entities={},
+            short_summary="Code fallback.",
+            expanded_summary="Code fallback expanded.",
+        )
+
+        import signal_stream.analysis_tools as analysis_tools
+
+        original = analysis_tools.OllamaClient
+        analysis_tools.OllamaClient = FakeOllama
+        try:
+            updated = _apply_analyst_mode(
+                [signal],
+                config,
+                "hybrid",
+                "prompt",
+                {"model_score_adjustment_limit": 20, "summary_mode": "short_expanded", "entity_extraction": "hybrid", "analyst_full_review": True},
+                {"sig_1": {"article_text": "The company launched a new agent evaluation tool for development teams."}},
+            )[0]
+        finally:
+            analysis_tools.OllamaClient = original
+
+        self.assertEqual(updated.short_summary, "The launch gives developers a clearer way to evaluate agent workflows before production.")
+
+    def test_missing_batch_review_still_repairs_top_candidate_summary(self) -> None:
+        class FakeOllama:
+            def __init__(self, config):  # noqa: ANN001
+                pass
+
+            def available(self) -> bool:
+                return True
+
+            def chat_json(self, system, user, schema):  # noqa: ANN001
+                if "review_ranked_signals" in user:
+                    return None
+                return {
+                    "short_summary": "The story gives teams a practical way to simplify reporting logic.",
+                    "expanded_summary": "The story gives teams a practical way to simplify reporting logic. It matters because repeated formatting rules can become maintenance risk.",
+                }
+
+        config = SignalConfig(
+            name="Test",
+            organization="Test",
+            audience="Reader",
+            mission="Test",
+            competitors=[],
+            markets=[],
+            priorities=[Priority("AI")],
+            sources=[],
+            storage_path=":memory:",
+            output_dir=".",
+            ollama=OllamaConfig(enabled=True),
+        )
+        signal = Signal(
+            id="sig_1",
+            cluster_id="cluster",
+            article_id="article",
+            title="Long copied title",
+            url="",
+            source="Source",
+            published_at="",
+            score=60,
+            urgency="medium",
+            event_type="builder_tactic",
+            summary="Long copied title with article opening copied here.",
+            why_it_matters="Code fallback why.",
+            next_steps=[],
+            matched_priorities=[],
+            entities={},
+            short_summary="Long copied title with article opening copied here.",
+            expanded_summary="Fallback expanded.",
+        )
+
+        import signal_stream.analysis_tools as analysis_tools
+
+        original = analysis_tools.OllamaClient
+        analysis_tools.OllamaClient = FakeOllama
+        try:
+            updated = _apply_analyst_mode(
+                [signal],
+                config,
+                "hybrid",
+                "prompt",
+                {"model_score_adjustment_limit": 20, "summary_mode": "short_expanded", "entity_extraction": "hybrid", "analyst_review_limit": 30},
+                {"sig_1": {"article_text": "Article about simplifying DAX reporting logic."}},
+            )[0]
+        finally:
+            analysis_tools.OllamaClient = original
+
+        self.assertEqual(updated.short_summary, "The story gives teams a practical way to simplify reporting logic.")
+
+    def test_lazy_title_echo_is_not_accepted_as_model_summary(self) -> None:
+        self.assertTrue(_looks_like_lazy_summary("Big AI Launch: Big AI Launch details here.", "Big AI Launch"))
+        self.assertFalse(_looks_like_lazy_summary("The release gives developers a cheaper way to run agent workflows in production.", "Big AI Launch"))
 
 
 if __name__ == "__main__":
