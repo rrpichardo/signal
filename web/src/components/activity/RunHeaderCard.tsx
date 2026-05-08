@@ -1,7 +1,7 @@
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { relativeTime, shortTime } from "@/lib/format";
-import type { AgentRun } from "@/lib/types";
+import { relativeTime, shortTime, tryParse } from "@/lib/format";
+import type { AgentRun, RunSummary } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 // Top card on the Activity page — shows the run goal, status chip, and timing.
@@ -10,6 +10,12 @@ export function RunHeaderCard({ run }: { run: AgentRun }) {
     run.status === "completed" ? "low" :
     run.status === "running" ? "medium" :
     run.status === "failed" ? "critical" : "default";
+
+  // Pull the failure reason out of summary_json so the user doesn't have to
+  // grep logs to find out why a red badge happened. Defensive parse — we'd
+  // rather show "failed" with no reason than crash the activity page.
+  const summary = tryParse<RunSummary>(run.summary_json);
+  const failureReason = run.status === "failed" ? summary?.reason : undefined;
 
   return (
     <Card>
@@ -32,6 +38,15 @@ export function RunHeaderCard({ run }: { run: AgentRun }) {
             <Badge variant={statusVariant}>{run.status}</Badge>
           </div>
         </div>
+
+        {failureReason && (
+          <div className="mt-3 rounded-sm border border-destructive/40 bg-destructive/10 p-3 text-meta text-destructive">
+            <span className="font-semibold">Failed:</span> {failureReason}
+            {summary?.last_action && (
+              <span className="text-destructive/80"> (during {summary.last_action})</span>
+            )}
+          </div>
+        )}
 
         <div className="mt-4 flex flex-wrap gap-x-6 gap-y-2 text-meta text-muted-foreground">
           <span>Started {relativeTime(run.started_at)} ({shortTime(run.started_at)})</span>

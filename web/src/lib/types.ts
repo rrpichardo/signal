@@ -47,6 +47,19 @@ export interface AgentRun {
   summary_json: string | null;
 }
 
+// Parsed shape of summary_json. The Python side writes:
+//   - {"reason": "...", "last_action": "..."} on failure
+//   - {"reason": "stale: no events for 300s"} when the sweeper marks it stale
+//   - {"articles": N, "signals": N, "output_path": "..."} on success
+// All fields optional because old rows may be partial or empty.
+export interface RunSummary {
+  reason?: string;
+  last_action?: string;
+  articles?: number;
+  signals?: number;
+  output_path?: string;
+}
+
 // Each timeline event from /api/events. payload_json is a raw JSON string.
 export interface AgentEvent {
   id: number;

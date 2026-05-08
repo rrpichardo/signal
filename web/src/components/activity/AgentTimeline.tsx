@@ -39,12 +39,27 @@ export function AgentTimeline({ events }: AgentTimelineProps) {
         const payload = tryParse<Record<string, unknown>>(ev.payload_json);
         const hasPayload = payload !== undefined && Object.keys(payload).length > 0;
         const isOpen = expanded === ev.id;
+        // Error events get a destructive treatment so the failure point is
+        // visually obvious when scanning a long timeline. Matches the red
+        // status badge on the run header card so the eye links the two.
+        const isError = ev.event_type === "error";
 
         return (
-          <div key={ev.id} className="relative flex gap-4 pb-5 last:pb-0">
+          <div
+            key={ev.id}
+            className={cn(
+              "relative flex gap-4 pb-5 last:pb-0",
+              isError && "rounded-sm border border-destructive/40 bg-destructive/10 p-3",
+            )}
+          >
             {/* Coloured dot anchored to the vertical connector line. */}
             <div className="relative mt-1 flex h-3.5 w-3.5 shrink-0 items-center justify-center">
-              <span className={cn("h-2.5 w-2.5 rounded-full", agentColor(ev.agent))} />
+              <span
+                className={cn(
+                  "h-2.5 w-2.5 rounded-full",
+                  isError ? "bg-destructive" : agentColor(ev.agent),
+                )}
+              />
             </div>
 
             <div className="flex min-w-0 flex-1 flex-col gap-1">
@@ -53,19 +68,24 @@ export function AgentTimeline({ events }: AgentTimelineProps) {
                 <span
                   className={cn(
                     "font-semibold",
-                    ev.agent.toLowerCase() === "orchestrator" && "text-accent",
-                    ev.agent.toLowerCase() === "scout" && "text-blue-400",
-                    ev.agent.toLowerCase() === "analyst" && "text-emerald-400",
+                    isError && "text-destructive",
+                    !isError && ev.agent.toLowerCase() === "orchestrator" && "text-accent",
+                    !isError && ev.agent.toLowerCase() === "scout" && "text-blue-400",
+                    !isError && ev.agent.toLowerCase() === "analyst" && "text-emerald-400",
                   )}
                 >
                   {ev.agent}
                 </span>
-                <span className="text-muted-foreground">{ev.event_type}</span>
+                <span className={cn(isError ? "text-destructive font-semibold" : "text-muted-foreground")}>
+                  {ev.event_type}
+                </span>
                 <span className="ml-auto font-mono text-muted-foreground/60">{shortTime(ev.created_at)}</span>
               </div>
 
               {/* Human-readable message — the most important part. */}
-              <p className="text-ui text-foreground">{ev.message}</p>
+              <p className={cn("text-ui", isError ? "text-destructive" : "text-foreground")}>
+                {ev.message}
+              </p>
 
               {/* Expandable payload for debugging — hidden until clicked. */}
               {hasPayload && (

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import json
 import sqlite3
@@ -381,13 +382,68 @@ class SignalStorage:
             )
 
     def mark_stale_runs_failed(self) -> int:
-        """Mark any runs still in 'running' state as failed. Returns count updated."""
+        """Mark any runs still in 'running' state as failed. Returns count updated.
+
+        Used at dashboard shutdown so a SIGTERM never leaves rows orphaned. We
+        also stamp summary_json with a reason so the UI can explain to the user
+        why an old run is showing as failed instead of just a red badge.
+        """
+        reason_json = json.dumps({"reason": "dashboard shutdown swept stale run"}, sort_keys=True)
         with self.connect() as conn:
             cur = conn.execute(
-                "update agent_runs set status = 'failed', completed_at = ? where status = 'running'",
-                (utc_now_iso(),),
+                "update agent_runs set status = 'failed', completed_at = ?, "
+                "summary_json = coalesce(summary_json, ?) where status = 'running'",
+                (utc_now_iso(), reason_json),
             )
             return cur.rowcount
+
+    def mark_runs_failed_if_idle(self, max_idle_seconds: int) -> list[str]:
+        """Sweep 'running' rows whose timeline has been silent too long.
+
+        Plain English: every minute the dashboard calls this. If a run claims
+        to be running but its last agent_event is older than `max_idle_seconds`
+        (or it never logged any events at all), we mark it failed with a clear
+        reason. This unsticks orphaned runs without restarting the dashboard.
+        Returns the list of run_ids that were swept.
+        """
+        # Idle cutoff in ISO so it slots straight into the WHERE clause.
+        # Same format as utc_now_iso() (no microseconds, trailing 'Z') so the
+        # string comparison against created_at/started_at columns is correct.
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(seconds=max_idle_seconds)
+        ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        with self.connect() as conn:
+            # A row is considered idle when EITHER the most-recent event is
+            # older than the cutoff OR there are no events at all and the
+            # run itself started before the cutoff.
+            rows = conn.execute(
+                """
+                select r.id
+                from agent_runs r
+                left join (
+                    select run_id, max(created_at) as last_event
+                    from agent_events
+                    group by run_id
+                ) e on e.run_id = r.id
+                where r.status = 'running'
+                  and coalesce(e.last_event, r.started_at) < ?
+                """,
+                (cutoff,),
+            ).fetchall()
+            stale_ids = [row["id"] for row in rows]
+            if not stale_ids:
+                return []
+            reason_json = json.dumps(
+                {"reason": f"stale: no events for {max_idle_seconds}s"}, sort_keys=True
+            )
+            now = utc_now_iso()
+            placeholders = ",".join("?" * len(stale_ids))
+            conn.execute(
+                f"update agent_runs set status = 'failed', completed_at = ?, "
+                f"summary_json = coalesce(summary_json, ?) where id in ({placeholders})",
+                (now, reason_json, *stale_ids),
+            )
+            return stale_ids
 
     def save_agent_event(self, run_id: str, agent: str, event_type: str, message: str, payload: dict[str, Any] | None = None) -> None:
         with self.connect() as conn:
