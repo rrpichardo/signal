@@ -10,7 +10,6 @@ from .agents import (
     FeedbackAgent,
     IngestAgent,
     NormalizeAgent,
-    RelevanceAgent,
 )
 from .llm import BrainClient
 from .models import RunResult, Signal, SignalConfig, utc_now_iso
@@ -27,12 +26,25 @@ class SignalStreamOrchestrator:
         started_at = utc_now_iso()
         ctx = AgentContext(config=self.config, storage=self.storage, llm=BrainClient(self.config))
 
+        # Lazy imports break the analysis_tools ↔ orchestrator circular dependency.
+        from .analysis_tools import _base_score_card, _urgency, build_drafts_from_insights  # noqa: PLC0415
+        from .prompt_loader import load_scoring_rubric  # noqa: PLC0415
+
         FeedbackAgent().run(ctx)
         articles = IngestAgent().run(ctx)
         normalized = NormalizeAgent().run(ctx, articles)
         clusters = ClusterAgent().run(ctx, normalized)
         insights = EntityAgent().run(ctx, clusters)
-        drafts = RelevanceAgent().run(ctx, insights)
+        # Build drafts and score them. _base_score_card is the single source of
+        # truth for score; BriefingAgent reads draft.score set here.
+        drafts = build_drafts_from_insights(ctx, insights)
+        rubric = load_scoring_rubric(self.config.agent.brain_file)
+        for draft in drafts:
+            article = draft.cluster.articles[0]
+            score, _breakdown = _base_score_card(article, draft, rubric)
+            draft.score = score
+            draft.urgency = _urgency(score, self.config.critical_threshold)
+        drafts.sort(key=lambda d: d.score, reverse=True)
         signals = BriefingAgent().run(ctx, drafts)
 
         output = Path(output_path).expanduser().resolve() if output_path else self._default_output_path()

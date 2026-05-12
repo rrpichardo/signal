@@ -31,34 +31,46 @@ require_brain = true
 allow_mock_brain = false
 
 [[priorities]]
-name = "AI platform shifts"
-description = "Major model, platform, pricing, developer ecosystem, or product moves."
-weight = 2.2
-keywords = ["OpenAI", "Anthropic", "Gemini", "Claude", "ChatGPT", "agents", "API", "model", "pricing", "platform", "developer", "enterprise"]
+name = "Frontier AI Product And Model Launches"
+description = "Major model releases, capability jumps, frontier lab launches, and pricing/access changes."
+weight = 2.8
+keywords = ["Anthropic", "Claude", "Claude Code", "Claude Desktop", "Claude for Enterprise", "Artifacts", "Projects", "MCP", "model context protocol", "computer use", "tool use", "OpenAI", "ChatGPT", "GPT", "Gemini", "DeepMind", "Llama", "Meta AI", "Grok", "xAI", "Mistral", "frontier model", "model release", "new model", "reasoning model", "multimodal", "voice mode", "image generation", "video generation", "API", "SDK", "pricing", "enterprise plan", "developer platform", "feature launch", "product update"]
 
 [[priorities]]
-name = "Startup and investment signals"
-description = "Funding, acquisitions, launches, and category creation in AI and tech."
-weight = 1.6
-keywords = ["funding", "startup", "acquisition", "acquires", "launch", "seed", "Series A", "venture", "valuation", "YC"]
+name = "Agents And Developer Workflows"
+description = "Agent frameworks, tool use, developer platforms, IDE integrations, and dev workflows."
+weight = 2.3
+keywords = ["agents", "agentic", "AI agent", "coding agent", "Claude Code", "Codex", "Cursor", "Devin", "Replit", "Windsurf", "IDE", "CLI", "developer tools", "tool calling", "function calling", "browser use", "computer use", "workflow automation", "orchestration", "multi-agent", "evals", "evaluation", "observability", "prompt engineering", "RAG", "retrieval", "embeddings", "fine-tuning"]
 
 [[priorities]]
-name = "Infrastructure and chips"
-description = "Compute, GPU, cloud, data center, and AI infrastructure constraints or breakthroughs."
-weight = 1.7
-keywords = ["NVIDIA", "GPU", "chip", "compute", "cloud", "infrastructure", "data center", "latency", "inference", "training"]
-
-[[priorities]]
-name = "Regulation and risk"
-description = "Policy, safety, copyright, privacy, and enterprise adoption risks."
+name = "Enterprise AI Adoption And Monetization"
+description = "Enterprise rollouts, fortune-500 customers, productivity case studies, vertical AI deployments."
 weight = 1.8
-keywords = ["regulation", "policy", "copyright", "lawsuit", "privacy", "security", "safety", "EU AI Act", "compliance", "risk"]
+keywords = ["enterprise", "customer", "deployment", "pilot", "procurement", "ROI", "productivity", "integration", "partnership", "Microsoft 365", "Google Workspace", "Salesforce", "ServiceNow", "Databricks", "Snowflake", "Oracle", "AWS", "Azure", "Google Cloud", "pricing", "subscription", "seats", "revenue", "ARR", "go-to-market", "compliance", "security review"]
 
 [[priorities]]
-name = "Builder tactics"
-description = "Practical technical essays and operator lessons worth applying."
-weight = 1.3
-keywords = ["architecture", "engineering", "prompt", "evaluation", "RAG", "fine-tuning", "product", "growth", "PM", "case study"]
+name = "AI Infrastructure, Chips, And Inference"
+description = "GPUs, accelerators, datacenters, inference cost, compute supply, training runs."
+weight = 1.8
+keywords = ["NVIDIA", "AMD", "Intel", "GPU", "TPU", "chip", "accelerator", "compute", "inference", "training", "data center", "cloud", "AWS", "Azure", "Google Cloud", "CoreWeave", "Lambda", "latency", "throughput", "HBM", "CUDA", "networking", "capacity", "power", "energy", "capex", "inference cost", "model serving"]
+
+[[priorities]]
+name = "AI Startups, Funding, And Category Creation"
+description = "Seed/Series/IPO/M&A, new entrants, valuations, founder moves in AI."
+weight = 1.6
+keywords = ["startup", "funding", "seed", "Series A", "Series B", "Series C", "venture", "valuation", "YC", "acquisition", "acquires", "merger", "IPO", "spinout", "launch", "category", "market map", "open source startup", "AI app", "AI infrastructure startup", "AI tooling", "revenue", "ARR"]
+
+[[priorities]]
+name = "AI Regulation, Safety, Copyright, And Platform Risk"
+description = "Policy, EU AI Act, safety research, alignment incidents, lawsuits, copyright."
+weight = 1.7
+keywords = ["regulation", "regulatory", "policy", "EU AI Act", "copyright", "lawsuit", "privacy", "security", "safety", "compliance", "antitrust", "export controls", "data protection", "model misuse", "deepfake", "watermarking", "governance", "liability", "content licensing", "training data", "fair use"]
+
+[[priorities]]
+name = "High-Signal Builder Tactics"
+description = "Practical engineering essays, eval methodologies, RAG patterns, post-mortems."
+weight = 1.2
+keywords = ["architecture", "engineering", "case study", "postmortem", "benchmark", "eval", "evaluation", "RAG", "retrieval", "vector database", "embeddings", "fine-tuning", "prompt", "observability", "monitoring", "workflow", "automation", "latency", "cost optimization", "production AI"]
 
 # Medium sources from the Claude chat.
 [[sources]]

@@ -26,8 +26,10 @@ class PipelineTest(unittest.TestCase):
             self.assertGreaterEqual(result.article_count, 8)
             self.assertGreaterEqual(result.cluster_count, 1)
             self.assertGreaterEqual(result.signal_count, 5)
-            self.assertGreaterEqual(result.top_signals[0].score, 70)
-            self.assertIn(result.top_signals[0].urgency, {"high", "critical"})
+            # Wave 3: new 5-component rubric. Unknown-date sample articles top out
+            # around 60-65. Threshold lowered from 70 to 50 to reflect new scoring.
+            self.assertGreaterEqual(result.top_signals[0].score, 50)
+            self.assertIn(result.top_signals[0].urgency, {"medium", "high", "critical"})
 
 
 if __name__ == "__main__":

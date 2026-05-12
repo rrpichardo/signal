@@ -22,7 +22,11 @@ class AgentBrainSettingsTest(unittest.TestCase):
                 {
                     "behavior": {"relevance_policy": "soft_keep", "model_score_adjustment_limit": 20},
                     "prompts": {"scout": "Scout test prompt"},
-                    "scoring": {"max_points": {"repeat_penalty": 30}, "low_value_phrases": ["promo"]},
+                    # Wave 3: new 5-component rubric keys replace old max_points/freshness
+                    "scoring": {
+                        "priority_match_bands": {"direct_high_impact": 30},
+                        "recency_bands": {"within_1_day": 20},
+                    },
                 },
             )
 
@@ -31,8 +35,9 @@ class AgentBrainSettingsTest(unittest.TestCase):
             self.assertEqual(brain["behavior"]["model_score_adjustment_limit"], 20)
             self.assertEqual(brain["behavior"]["analyst_review_limit"], 8)
             self.assertEqual(brain["prompts"]["scout"], "Scout test prompt")
-            self.assertEqual(brain["scoring"]["max_points"]["repeat_penalty"], 30)
-            self.assertIn("promo", brain["scoring"]["low_value_phrases"])
+            # New scoring keys round-trip correctly
+            self.assertEqual(brain["scoring"]["priority_match_bands"]["direct_high_impact"], 30)
+            self.assertEqual(brain["scoring"]["recency_bands"]["within_1_day"], 20)
 
     def test_scout_soft_keep_keeps_model_labeled_drop_items(self) -> None:
         class FakeLLM:
@@ -65,25 +70,42 @@ class AgentBrainSettingsTest(unittest.TestCase):
         self.assertEqual(_bounded_model_score(60, 10, "hybrid", 20), 40)
         self.assertEqual(_bounded_model_score(60, 95, "model", 20), 95)
 
-    def test_strong_repeat_penalty_is_larger_but_does_not_hide_story(self) -> None:
+    def test_score_card_uses_5_components_and_no_repeat_penalty(self) -> None:
+        """Wave 3: _base_score_card uses the 5-component rubric with no memory/repeat penalty."""
+
+        class FakeCluster:
+            articles = [Article.from_fields(source="Test", title="Repeat story", body="AI platform news")]
+
         class Draft:
             matched_priorities = []
             entities = {"competitors": [], "organizations": []}
-            cluster = type("Cluster", (), {"articles": [object()]})()
+            event_type = "platform_shift"
+            cluster = FakeCluster()
+            text = "Repeat story AI platform news"
 
         article = Article.from_fields(source="Test", title="Repeat story", body="AI platform news")
+        # New signature: no memory_hits, no event_type param, no behavior
         score, breakdown = _base_score_card(
             article,
             Draft(),
-            memory_hits=[{"id": "old"}],
-            event_type="platform_shift",
-            scoring_rubric=load_brain_file(None)["scoring"],
-            behavior={"repeat_penalty_strength": "strong"},
+            load_brain_file(None)["scoring"],
         )
 
-        repeat_line = next(item for item in breakdown if item["name"] == "Repeat penalty")
-        self.assertEqual(repeat_line["points"], -12)
+        # The 5 expected component names
+        names = {item["name"] for item in breakdown}
+        self.assertIn("Priority match", names)
+        self.assertIn("Company match", names)
+        self.assertIn("Recency", names)
+        self.assertIn("Event strength", names)
+        self.assertIn("Corroboration", names)
+
+        # No repeat penalty or freshness line
+        self.assertNotIn("Repeat penalty", names)
+        self.assertNotIn("Freshness", names)
+
+        # Score is in valid range
         self.assertGreaterEqual(score, 0)
+        self.assertLessEqual(score, 100)
 
     def test_dashboard_settings_helpers_read_and_write_brain_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
