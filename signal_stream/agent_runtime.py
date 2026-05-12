@@ -289,6 +289,7 @@ class SignalAgentRuntime:
             summary = {
                 "articles": len(state["articles"]),
                 "signals": len(signals),
+                "cluster_count": int(state.get("analysis", {}).get("cluster_count", 0)),
                 "output_path": output_path,
             }
             if state["finalized"]:

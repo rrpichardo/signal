@@ -373,5 +373,22 @@ class SourceCapTests(unittest.TestCase):
             self.assertEqual(result.get("source_capped"), 25)
 
 
+class RunIdCollisionTests(unittest.TestCase):
+    def test_back_to_back_runs_no_pk_conflict(self) -> None:
+        # Two rapid consecutive runs with the same goal must not collide on PK.
+        # Before the UUID fix, stable_id(goal, utc_now_iso()) produced the same
+        # hash when both calls landed in the same second.
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = _new_storage(Path(tmp))
+            run_id_1 = storage.start_agent_run("same goal")
+            run_id_2 = storage.start_agent_run("same goal")
+            self.assertNotEqual(run_id_1, run_id_2)
+            with storage.connect() as conn:
+                count = conn.execute(
+                    "select count(*) from agent_runs where goal = ?", ("same goal",)
+                ).fetchone()[0]
+            self.assertEqual(count, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

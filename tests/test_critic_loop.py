@@ -195,7 +195,6 @@ class CriticLoopIntegrationTest(unittest.TestCase):
 
                     [agent]
                     max_iterations = 6
-                    min_signals = 3
                     dashboard_port = 8878
                     worker_timeout_seconds = 30
                     require_brain = false
@@ -284,7 +283,6 @@ class CriticLoopIntegrationTest(unittest.TestCase):
 
                     [agent]
                     max_iterations = 4
-                    min_signals = 3
                     dashboard_port = 8879
                     worker_timeout_seconds = 30
                     require_brain = false

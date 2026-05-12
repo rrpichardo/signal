@@ -39,7 +39,6 @@ class AgentRuntimeTest(unittest.TestCase):
 
                     [agent]
                     max_iterations = 4
-                    min_signals = 3
                     dashboard_port = 8877
                     worker_timeout_seconds = 30
                     require_brain = false

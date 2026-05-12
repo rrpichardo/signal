@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import json
 import sqlite3
+import uuid
 from typing import Any
 
 from .models import Article, Signal, ToolCall, stable_id, utc_now_iso
@@ -342,13 +343,6 @@ class SignalStorage:
                     for signal in signals
                 ],
             )
-            conn.execute(
-                """
-                insert into runs (started_at, completed_at, article_count, cluster_count, signal_count, output_path)
-                values (?, ?, ?, ?, ?, ?)
-                """,
-                (started_at, completed_at, len(articles), cluster_count, len(signals), output_path),
-            )
             # Flip agent_runs.status to 'complete' inside the same transaction
             # — this is the contract the cursor depends on. If anything above
             # raised, this update never lands and the cursor stays put.
@@ -480,15 +474,26 @@ class SignalStorage:
         }
 
     def latest_run(self) -> dict[str, Any] | None:
-        # Most recent completed run from the runs table. Used as a cursor for
-        # "latest run" scope filtering on the digest page.
+        # Most recent complete run from agent_runs. Used by the dashboard to scope
+        # the digest page to the latest run's articles.
         with self.connect() as conn:
             row = conn.execute(
-                "select id, started_at, completed_at, article_count, cluster_count, "
-                "signal_count, output_path "
-                "from runs order by started_at desc limit 1"
+                "select id, started_at, completed_at, summary_json "
+                "from agent_runs where status = 'complete' "
+                "order by started_at desc, completed_at desc, id desc limit 1"
             ).fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        summary = json.loads(row["summary_json"] or "{}")
+        return {
+            "id": row["id"],
+            "started_at": row["started_at"],
+            "completed_at": row["completed_at"],
+            "article_count": summary.get("articles", 0),
+            "cluster_count": summary.get("cluster_count", 0),
+            "signal_count": summary.get("signals", 0),
+            "output_path": summary.get("output_path", ""),
+        }
 
     def _hydrate_signal_row(self, row: Any) -> dict[str, Any]:
         # Shared post-processing for signal rows: parse JSON fields and apply UI fallbacks.
@@ -535,7 +540,7 @@ class SignalStorage:
         return adjustments
 
     def start_agent_run(self, goal: str) -> str:
-        run_id = stable_id(goal, utc_now_iso(), prefix="run")
+        run_id = f"run_{uuid.uuid4().hex[:16]}"
         with self.connect() as conn:
             conn.execute(
                 "insert into agent_runs (id, goal, status, started_at) values (?, ?, ?, ?)",
