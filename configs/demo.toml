@@ -15,11 +15,13 @@ digest_limit = 10
 critical_threshold = 82
 similarity_threshold = 0.52
 
-[ollama]
-enabled = false
-model = "qwen3:1.7b"
-host = "http://localhost:11434"
-timeout_seconds = 45
+[brain]
+model = "meta-llama/llama-4-scout-17b-16e-instruct"
+timeout_seconds = 60
+
+[agent]
+allow_mock_brain = true
+require_brain = false
 
 [[priorities]]
 name = "Protect clients from burned assets"

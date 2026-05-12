@@ -10,7 +10,7 @@ from typing import Any
 
 from .analysis_tools import analyze_articles, score_digest_quality
 from .config import load_config
-from .llm import OllamaClient
+from .llm import BrainClient
 from .models import SourceConfig
 from .prompt_loader import load_behavior_settings, load_prompt_set, load_scoring_rubric
 from .source_tools import enrich_articles_with_model, fetch_context, fetch_source
@@ -81,7 +81,7 @@ def handle_task(
             for result in results:
                 articles.extend(result.get("articles", []))
             if _mode(behavior, config, "scout") in {"hybrid", "model"}:
-                llm = OllamaClient(config)
+                llm = BrainClient(config)
                 articles = enrich_articles_with_model(
                     llm,
                     prompts["scout"],
@@ -93,7 +93,7 @@ def handle_task(
         if task_type == "collect_more_context":
             result = fetch_context(str(payload.get("query", "")), list(payload.get("articles", [])), int(payload.get("limit", 5)))
             if _mode(behavior, config, "scout") in {"hybrid", "model"}:
-                llm = OllamaClient(config)
+                llm = BrainClient(config)
                 result["articles"] = enrich_articles_with_model(
                     llm,
                     prompts["scout"],
@@ -121,7 +121,7 @@ def handle_task(
         # decides whether to ship. It runs code checks always and optionally calls
         # the LLM in hybrid/model mode using the analyst_mode setting as a proxy
         # (critics review Analyst output, so the same mode switch makes sense).
-        llm = OllamaClient(config) if _mode(behavior, config, "analyst") in {"hybrid", "model"} else None
+        llm = BrainClient(config) if _mode(behavior, config, "analyst") in {"hybrid", "model"} else None
         data = score_digest_quality(
             signals=list(payload.get("signals", [])),
             critic_prompt=prompts.get("critic", ""),

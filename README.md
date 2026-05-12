@@ -2,14 +2,14 @@
 
 Signal Stream is a local-first AI/tech intelligence agent. It is built to be agentic, not just automated: an Orchestrator agent decides what to do next, starts separate Scout and Analyst worker processes, inspects their results, uses memory, and then finalizes a digest when it has enough signal.
 
-The approved MVP runs on demand, uses local Ollama as the agent brain, stores memory in SQLite, and serves a local dashboard.
+The approved MVP runs on demand, uses Groq (cloud) as the agent brain, stores memory in SQLite, and serves a local dashboard. Requires a `GROQ_API_KEY` environment variable.
 
 ## Quick Start
 
-Install and start Ollama, then pull a small model:
+Export your Groq API key:
 
 ```bash
-ollama pull qwen3:1.7b
+export GROQ_API_KEY=<your-key>
 ```
 
 Run the agent:

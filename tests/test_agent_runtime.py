@@ -42,13 +42,11 @@ class AgentRuntimeTest(unittest.TestCase):
                     min_signals = 3
                     dashboard_port = 8877
                     worker_timeout_seconds = 30
-                    require_ollama = false
+                    require_brain = false
                     allow_mock_brain = true
 
-                    [ollama]
-                    enabled = false
-                    model = "qwen3:1.7b"
-                    host = "http://localhost:11434"
+                    [brain]
+                    model = "meta-llama/llama-4-scout-17b-16e-instruct"
                     timeout_seconds = 10
 
                     [[priorities]]

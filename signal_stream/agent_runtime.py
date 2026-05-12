@@ -10,7 +10,7 @@ import threading
 import traceback
 from typing import Any
 
-from .llm import OllamaClient
+from .llm import BrainClient
 from .models import AgentDecision, Signal, SignalConfig, ToolCall, stable_id, utc_now_iso
 from .prompt_loader import load_prompt_set
 from .prompts import DECISION_SCHEMA
@@ -150,7 +150,7 @@ class SignalAgentRuntime:
         self.config = config
         self.config_path = config_path
         self.storage = SignalStorage(config.storage_path)
-        self.llm = OllamaClient(config)
+        self.llm = BrainClient(config)
         self.prompts = load_prompt_set(config.agent.brain_file)
 
     def run(self, goal: str | None = None) -> dict[str, Any]:
@@ -160,11 +160,11 @@ class SignalAgentRuntime:
         self.storage.save_agent_event(run_id, "Orchestrator", "start", "Started local agent run.", {"goal": goal})
         _run_completed = False
 
-        if self.config.agent.require_ollama and not self.llm.available():
-            message = self.llm.last_error or "Ollama is not available."
-            self.storage.save_agent_event(run_id, "Orchestrator", "error", "Ollama is required for the agent brain.", {"error": message})
+        if self.config.agent.require_brain and not self.llm.available():
+            message = self.llm.last_error or "Brain (Groq) is not available."
+            self.storage.save_agent_event(run_id, "Orchestrator", "error", "Groq brain is required but unavailable.", {"error": message})
             self.storage.finish_agent_run(run_id, "error", {"error": message})
-            raise AgentRuntimeError(f"Ollama is required for agentic mode but is unavailable: {message}")
+            raise AgentRuntimeError(f"Brain (Groq) is required for agentic mode but is unavailable: {message}")
 
         scout = WorkerClient("scout", self.config_path, self.config.agent.worker_timeout_seconds)
         analyst = WorkerClient("analyst", self.config_path, self.config.agent.worker_timeout_seconds)
@@ -333,9 +333,9 @@ class SignalAgentRuntime:
                 critic.close()
 
     def _decide(self, run_id: str, state: dict[str, Any], iteration: int) -> AgentDecision:
-        """Ask Ollama what the Orchestrator should do next."""
+        """Ask the brain what the Orchestrator should do next."""
 
-        if self.config.agent.allow_mock_brain or not self.config.ollama.enabled:
+        if self.config.agent.allow_mock_brain:
             return _mock_decision(state)
 
         user = json.dumps(
@@ -357,7 +357,7 @@ class SignalAgentRuntime:
         raw = self.llm.chat_json(self.prompts["orchestrator"], user, DECISION_SCHEMA)
         # Log the full brain trace — system prompt, user payload, raw model
         # response — as one event so the dashboard timeline can show exactly
-        # what was sent to Ollama and exactly what came back. getattr() guards
+        # what was sent to Groq and exactly what came back. getattr() guards
         # against test mocks that don't expose last_response_text.
         self.storage.save_agent_event(
             run_id,
@@ -372,7 +372,7 @@ class SignalAgentRuntime:
             },
         )
         if not raw:
-            self.storage.save_agent_event(run_id, "Orchestrator", "warning", "Ollama decision failed; using safe local decision.", {"error": self.llm.last_error or ""})
+            self.storage.save_agent_event(run_id, "Orchestrator", "warning", "Brain decision failed; using safe local decision.", {"error": self.llm.last_error or ""})
             return _mock_decision(state)
         return AgentDecision(
             thought=str(raw.get("thought", "")),

@@ -8,7 +8,7 @@ import xml.etree.ElementTree as ET
 from typing import Any
 from urllib import error, request
 
-from .llm import OllamaClient
+from .llm import BrainClient
 from .models import Article, SourceConfig
 from .text import clean_html, normalize_space
 
@@ -108,7 +108,7 @@ def fetch_context(query: str, articles: list[dict[str, Any]], limit: int = 5) ->
 
 
 def enrich_articles_with_model(
-    llm: OllamaClient,
+    llm: BrainClient,
     scout_prompt: str,
     articles: list[dict[str, Any]],
     *,

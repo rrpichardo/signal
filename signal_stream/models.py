@@ -38,11 +38,9 @@ class SourceConfig:
 
 
 @dataclass
-class OllamaConfig:
-    enabled: bool = True
-    model: str = "qwen3:1.7b"
-    host: str = "http://localhost:11434"
-    timeout_seconds: int = 45
+class BrainConfig:
+    model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
+    timeout_seconds: int = 60
 
 
 @dataclass
@@ -50,13 +48,13 @@ class AgentConfig:
     max_iterations: int = 6
     min_signals: int = 8
     dashboard_port: int = 8765
-    worker_timeout_seconds: int = 120
+    worker_timeout_seconds: int = 1800
     max_article_age_days: int = 14
     brain_file: str = "configs/agent_brain.toml"
     prompt_file: str = "configs/agent_brain.toml"
     scout_mode: str = "code"
     analyst_mode: str = "code"
-    require_ollama: bool = True
+    require_brain: bool = True
     allow_mock_brain: bool = False
     # Critic-loop configuration. Defaults to off so existing runs are unchanged.
     # Flip enable_critic in configs/agent_brain.toml [behavior] to activate.
@@ -80,7 +78,7 @@ class SignalConfig:
     digest_limit: int = 10
     critical_threshold: int = 82
     similarity_threshold: float = 0.52
-    ollama: OllamaConfig = field(default_factory=OllamaConfig)
+    brain: BrainConfig = field(default_factory=BrainConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
 
 

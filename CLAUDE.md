@@ -5,7 +5,7 @@ Signal Stream is a local-first AI/tech intelligence agent that produces a daily 
 ## Stack
 
 - **Language:** Python 3.11+ (stdlib only — zero third-party deps)
-- **Agent brain:** Ollama running locally (default model: `qwen3:1.7b`)
+- **Agent brain:** Groq cloud API (model: `meta-llama/llama-4-scout-17b-16e-instruct`). Requires `GROQ_API_KEY` env var.
 - **Memory:** SQLite (stored at `../.signal_stream/signal_stream.db`)
 - **Frontend:** React + Vite + shadcn/ui (`web/`) served by the Python dashboard
 - **Deployment:** Local-first. No remote deployment configured. Future direction: Railway (not yet wired up).
@@ -47,8 +47,8 @@ Agents communicate via explicit inputs/outputs. Keep this design — it's ready 
 ## Setup
 
 ```bash
-# Backend has zero pip dependencies — just need Python 3.11+ and Ollama
-ollama pull qwen3:1.7b
+# Backend has zero pip dependencies — just need Python 3.11+ and a GROQ_API_KEY
+export GROQ_API_KEY=<your-key>
 
 # Build the frontend once
 cd web && npm install && npm run build && cd ..
@@ -99,7 +99,7 @@ Set in `configs/agent_brain.toml` (or via the dashboard Settings tab):
 
 ## Constraints and Gotchas
 
-- Ollama must be running before `agent run`. Start it with `ollama serve` and confirm the model is pulled.
+- `GROQ_API_KEY` must be exported before `agent run`. The app does NOT auto-load `.env` — either `export GROQ_API_KEY=<key>` or `source .env` first.
 - The dashboard uses a PID file to guarantee one instance. Don't bypass it.
 - Agent prompts and model defaults live in `configs/agent_brain.toml`. `signal_stream/prompts.py` is the fallback copy only — edit the TOML, not the Python file.
 - React UI lags behind Python features (see Known Gaps). When adding a new agent capability, update both `dashboard.py` (legacy) and `web/src/` (React) — and the TypeScript types in `web/src/lib/types.ts`.
