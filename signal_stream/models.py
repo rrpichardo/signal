@@ -135,12 +135,6 @@ class SignalDraft:
     matched_priorities: list[dict[str, Any]]
     event_type: str
     text: str
-    # score and urgency are NOT set during draft creation.
-    # In the agentic path (analyze_articles), Signal.score comes exclusively
-    # from _base_score_card. In the legacy orchestrator path, orchestrator.py
-    # populates these via _base_score_card before BriefingAgent runs.
-    score: int = 0
-    urgency: str = "low"
 
 
 @dataclass

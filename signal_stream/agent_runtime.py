@@ -12,7 +12,7 @@ from typing import Any
 
 from .llm import BrainClient
 from .models import AgentDecision, Article, Signal, SignalConfig, ToolCall, stable_id, utc_now_iso
-from .prompt_loader import load_prompt_set
+from .prompt_loader import load_behavior_settings, load_prompt_set
 from .prompts import DECISION_SCHEMA
 from .storage import SignalStorage
 
@@ -152,6 +152,7 @@ class SignalAgentRuntime:
         self.storage = SignalStorage(config.storage_path)
         self.llm = BrainClient(config)
         self.prompts = load_prompt_set(config.agent.brain_file)
+        self.behavior = load_behavior_settings(config.agent.brain_file)
 
     def run(self, goal: str | None = None) -> dict[str, Any]:
         self.storage.init()
@@ -233,6 +234,19 @@ class SignalAgentRuntime:
                 elif decision.action == "analyze_articles":
                     # Step 2c: Analyst judges the collected material. This worker
                     # handles dedupe, scoring, memory checks, and digest copy.
+                    review_limit = int(self.behavior.get("analyst_review_limit", 40))
+                    article_count = len(state["articles"])
+                    if self.behavior.get("analyst_full_review"):
+                        self.storage.save_agent_event(
+                            run_id, "Analyst", "fetching_full_articles",
+                            f"Fetching full article pages for top {min(review_limit, article_count)}/{article_count} candidates.",
+                            {"review_limit": review_limit, "article_count": article_count},
+                        )
+                        self.storage.save_agent_event(
+                            run_id, "Analyst", "groq_reviewing",
+                            f"Sending top {min(review_limit, article_count)} articles to Groq one-per-request.",
+                            {"batch_size": int(self.behavior.get("analyst_review_batch_size", 1)), "review_limit": review_limit},
+                        )
                     result = self._call_worker(run_id, analyst, "analyze_articles", {"articles": state["articles"]})
                     state["analysis"] = result.get("data", {})
                     self.storage.save_agent_event(run_id, "Analyst", "observation", "Analyzed candidate articles.", _compact_result(result))
@@ -298,6 +312,14 @@ class SignalAgentRuntime:
                 # to the seen-set. Only complete runs advance the cursor — the
                 # whole insert + status='complete' transition happens here.
                 collected = [_article_from_state_dict(item) for item in state["articles"]]
+                # executive_summary_limit: how many top signals get saved to memory.
+                # Top-12 stay in the dedup set; rest are digest-only.
+                exec_limit = int(self.behavior.get("executive_summary_limit", 12))
+                exec_signals = signals[:exec_limit]
+                self.storage.save_agent_event(
+                    run_id, "Analyst", "writing_digest",
+                    f"Preparing digest: {len(signals)} signals, executive summary: top {exec_limit}.", {}
+                )
                 self.storage.save_run_atomic(
                     articles=collected,
                     signals=signals,
@@ -307,7 +329,7 @@ class SignalAgentRuntime:
                     run_id=run_id,
                     summary=summary,
                 )
-                for signal in signals[: self.config.digest_limit]:
+                for signal in exec_signals:
                     # Memory is how Signal Stream avoids acting like every day is day
                     # one. Future runs can see these saved topics and downgrade repeats.
                     self.storage.save_memory_for_signal(signal)

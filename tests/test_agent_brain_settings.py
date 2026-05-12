@@ -33,7 +33,7 @@ class AgentBrainSettingsTest(unittest.TestCase):
             brain = load_brain_file(path)
             self.assertEqual(brain["behavior"]["relevance_policy"], "soft_keep")
             self.assertEqual(brain["behavior"]["model_score_adjustment_limit"], 20)
-            self.assertEqual(brain["behavior"]["analyst_review_limit"], 8)
+            self.assertEqual(brain["behavior"]["analyst_review_limit"], 40)
             self.assertEqual(brain["prompts"]["scout"], "Scout test prompt")
             # New scoring keys round-trip correctly
             self.assertEqual(brain["scoring"]["priority_match_bands"]["direct_high_impact"], 30)
@@ -153,7 +153,7 @@ brain_file = "{brain_path}"
             def available(self) -> bool:
                 return True
 
-            def chat_json(self, system, user, schema):  # noqa: ANN001
+            def chat_json(self, system, user, schema, **kwargs):  # noqa: ANN001
                 self.last_payload = user
                 return {
                     "signals": [
@@ -229,7 +229,7 @@ brain_file = "{brain_path}"
             def available(self) -> bool:
                 return True
 
-            def chat_json(self, system, user, schema):  # noqa: ANN001
+            def chat_json(self, system, user, schema, **kwargs):  # noqa: ANN001
                 self.calls += 1
                 if self.calls == 1:
                     return {

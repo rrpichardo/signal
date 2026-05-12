@@ -6,7 +6,7 @@ import time
 from typing import Any
 from urllib import error, request
 
-from .models import SignalConfig, SignalDraft
+from .models import SignalConfig
 
 
 class BrainClient:
@@ -130,36 +130,3 @@ class BrainClient:
             return None
         return parsed if isinstance(parsed, dict) else None
 
-    def summarize_signal(self, draft: SignalDraft, config: SignalConfig) -> dict[str, Any] | None:
-        priority_names = ", ".join(item["name"] for item in draft.matched_priorities) or "none"
-        prompt = f"""
-You are Signal Stream, a strategic intelligence analyst.
-Audience: {config.audience}
-Mission: {config.mission}
-
-Create a concise executive signal brief as JSON.
-Keep summary under 55 words.
-Keep why_it_matters under 45 words.
-Return 2 or 3 practical next_steps as a JSON array.
-
-Title: {draft.cluster.articles[0].title}
-Event type: {draft.event_type}
-Score: {draft.score}
-Urgency: {draft.urgency}
-Matched priorities: {priority_names}
-Entities: {json.dumps(draft.entities)}
-Article text:
-{draft.text[:4500]}
-""".strip()
-
-        result = self.chat_json(
-            "",
-            prompt,
-            temperature=0.0,
-            required_fields=["summary", "why_it_matters", "next_steps"],
-        )
-        if not result:
-            return None
-        if not isinstance(result.get("next_steps"), list):
-            result["next_steps"] = []
-        return result

@@ -13,29 +13,12 @@ from .models import (
     Article,
     Cluster,
     ClusterInsight,
-    Signal,
     SignalConfig,
     SignalDraft,
     stable_id,
 )
 from .storage import SignalStorage
-from .text import clean_html, extract_named_entities, first_sentences, jaccard, normalize_space, phrase_hits, tokenize
-
-
-URGENCY_TERMS = [
-    "breaking",
-    "urgent",
-    "investigation",
-    "lawsuit",
-    "security",
-    "outage",
-    "breach",
-    "funding",
-    "acquisition",
-    "risk",
-    "compliance",
-    "regulatory",
-]
+from .text import clean_html, extract_named_entities, jaccard, normalize_space, phrase_hits, tokenize
 
 
 @dataclass
@@ -198,47 +181,6 @@ class EntityAgent:
         return insights
 
 
-class BriefingAgent:
-    name = "BriefingAgent"
-
-    def run(self, ctx: AgentContext, drafts: list[SignalDraft]) -> list[Signal]:
-        signals: list[Signal] = []
-        llm_available = ctx.llm.available()
-        if not llm_available:
-            ctx.trace.add(self.name, "Brain unavailable, using deterministic summaries.", error=ctx.llm.last_error or "")
-
-        for draft in drafts:
-            article = draft.cluster.articles[0]
-            llm_brief = ctx.llm.summarize_signal(draft, ctx.config) if llm_available else None
-            summary = normalize_space((llm_brief or {}).get("summary")) or first_sentences(article.body)
-            why = normalize_space((llm_brief or {}).get("why_it_matters")) or _heuristic_why(draft)
-            next_steps = (llm_brief or {}).get("next_steps") or _next_steps(draft)
-            next_steps = [normalize_space(step) for step in next_steps if normalize_space(step)][:3]
-            signal_id = stable_id(draft.cluster.id, article.title, draft.score, prefix="sig")
-            signals.append(
-                Signal(
-                    id=signal_id,
-                    cluster_id=draft.cluster.id,
-                    article_id=article.id,
-                    title=article.title,
-                    url=article.url,
-                    source=article.source,
-                    published_at=article.published_at,
-                    score=draft.score,
-                    urgency=draft.urgency,
-                    event_type=draft.event_type,
-                    summary=summary,
-                    why_it_matters=why,
-                    next_steps=next_steps,
-                    matched_priorities=draft.matched_priorities,
-                    entities=draft.entities,
-                    duplicate_count=max(0, len(draft.cluster.articles) - 1),
-                )
-            )
-        ctx.trace.add(self.name, "Prepared executive signal briefs.", signals=len(signals), llm_used=llm_available)
-        return signals
-
-
 def _local_name(tag: str) -> str:
     return tag.split("}", 1)[-1]
 
@@ -270,49 +212,3 @@ def _cluster_text(cluster: Cluster) -> str:
     return normalize_space(" ".join(parts))
 
 
-def _heuristic_why(draft: SignalDraft) -> str:
-    priorities = [item["name"] for item in draft.matched_priorities[:2]]
-    competitors = draft.entities.get("competitors", [])
-    markets = draft.entities.get("markets", [])
-    pieces = []
-    if priorities:
-        pieces.append(f"Touches {', '.join(priorities)}")
-    if competitors:
-        pieces.append(f"mentions {', '.join(competitors[:3])}")
-    if markets:
-        pieces.append(f"affects {', '.join(markets[:3])}")
-    if not pieces:
-        return "May matter as an early external signal, but it needs human review before action."
-    return f"{'; '.join(pieces)}. Score {draft.score} with {draft.urgency} urgency."
-
-
-def _next_steps(draft: SignalDraft) -> list[str]:
-    if draft.event_type == "asset_risk":
-        return [
-            "Flag exposed clients and pause recommendations tied to the asset category.",
-            "Request provenance, ownership, and litigation checks before any transaction advice.",
-            "Prepare a short risk note for advisors handling similar consignments.",
-        ]
-    if draft.event_type == "regulatory_risk":
-        return [
-            "Ask compliance to review whether current diligence workflows cover the new requirement.",
-            "Update client intake questions for high-value or cross-border transactions.",
-            "Track the next regulatory milestone and likely enforcement date.",
-        ]
-    if draft.event_type == "competitor_move":
-        return [
-            "Compare the competitor move with current advisory offers and fees.",
-            "Identify clients most likely to notice the change.",
-            "Draft a response option for sales or relationship managers.",
-        ]
-    if draft.event_type == "market_opportunity":
-        return [
-            "Size the affected client segment and likely near-term demand.",
-            "Find three target accounts that could benefit from proactive outreach.",
-            "Monitor follow-up sources for confirmation before committing resources.",
-        ]
-    return [
-        "Assign an owner to validate the signal.",
-        "Check whether existing clients, competitors, or markets are directly exposed.",
-        "Revisit this item in the next briefing if corroborating sources appear.",
-    ]

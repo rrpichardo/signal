@@ -11,7 +11,7 @@ path = "../.signal_stream/signal_stream.db"
 
 [delivery]
 output_dir = "../outputs"
-digest_limit = 12
+digest_limit = 40
 critical_threshold = 86
 similarity_threshold = 0.48
 

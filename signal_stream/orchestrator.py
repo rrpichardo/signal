@@ -4,16 +4,23 @@ from pathlib import Path
 
 from .agents import (
     AgentContext,
-    BriefingAgent,
     ClusterAgent,
     EntityAgent,
     FeedbackAgent,
     IngestAgent,
     NormalizeAgent,
 )
+from .analysis_tools import (
+    _base_score_card,
+    _icon_key,
+    _urgency,
+    build_drafts_from_insights,
+    render_digest,
+)
 from .llm import BrainClient
-from .models import RunResult, Signal, SignalConfig, utc_now_iso
+from .models import RunResult, Signal, SignalConfig, stable_id, utc_now_iso
 from .storage import SignalStorage
+from .text import first_sentences
 
 
 class SignalStreamOrchestrator:
@@ -25,27 +32,47 @@ class SignalStreamOrchestrator:
         self.storage.init()
         started_at = utc_now_iso()
         ctx = AgentContext(config=self.config, storage=self.storage, llm=BrainClient(self.config))
-
-        # Lazy imports break the analysis_tools ↔ orchestrator circular dependency.
-        from .analysis_tools import _base_score_card, _urgency, build_drafts_from_insights  # noqa: PLC0415
-        from .prompt_loader import load_scoring_rubric  # noqa: PLC0415
+        from .prompt_loader import load_scoring_rubric  # noqa: PLC0415 - deferred to avoid top-level dep on TOML config paths
 
         FeedbackAgent().run(ctx)
         articles = IngestAgent().run(ctx)
         normalized = NormalizeAgent().run(ctx, articles)
         clusters = ClusterAgent().run(ctx, normalized)
         insights = EntityAgent().run(ctx, clusters)
-        # Build drafts and score them. _base_score_card is the single source of
-        # truth for score; BriefingAgent reads draft.score set here.
         drafts = build_drafts_from_insights(ctx, insights)
         rubric = load_scoring_rubric(self.config.agent.brain_file)
+
+        # _base_score_card is the single source of truth for Signal.score.
+        signals: list[Signal] = []
         for draft in drafts:
             article = draft.cluster.articles[0]
-            score, _breakdown = _base_score_card(article, draft, rubric)
-            draft.score = score
-            draft.urgency = _urgency(score, self.config.critical_threshold)
-        drafts.sort(key=lambda d: d.score, reverse=True)
-        signals = BriefingAgent().run(ctx, drafts)
+            score, score_breakdown = _base_score_card(article, draft, rubric)
+            urgency = _urgency(score, self.config.critical_threshold)
+            short_summary = first_sentences(article.body, max_sentences=2, max_chars=200)
+            signals.append(Signal(
+                id=stable_id(draft.cluster.id, article.title, score, prefix="sig"),
+                cluster_id=draft.cluster.id,
+                article_id=article.id,
+                title=article.title,
+                url=article.url,
+                source=article.source,
+                published_at=article.published_at,
+                score=score,
+                urgency=urgency,
+                event_type=draft.event_type,
+                summary=short_summary,
+                why_it_matters="",
+                next_steps=[],
+                matched_priorities=draft.matched_priorities,
+                entities=draft.entities,
+                duplicate_count=max(0, len(draft.cluster.articles) - 1),
+                score_breakdown=score_breakdown,
+                short_summary=short_summary,
+                expanded_summary=first_sentences(article.body, max_sentences=4, max_chars=600),
+                image_url=str(article.raw.get("image_url", "")),
+                icon_key=_icon_key(draft.event_type),
+            ))
+        signals.sort(key=lambda s: s.score, reverse=True)
 
         output = Path(output_path).expanduser().resolve() if output_path else self._default_output_path()
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -66,68 +93,3 @@ class SignalStreamOrchestrator:
         return Path(self.config.output_dir) / f"signal_stream_digest_{stamp}.md"
 
 
-def render_digest(config: SignalConfig, signals: list[Signal], events: object) -> str:
-    top_signals = signals[: config.digest_limit]
-    critical = [signal for signal in top_signals if signal.urgency == "critical"]
-
-    lines = [
-        "# Signal Stream Briefing",
-        "",
-        f"Generated: {utc_now_iso()}",
-        f"Organization: {config.organization or config.name}",
-        f"Audience: {config.audience}",
-        "",
-        "## Executive Snapshot",
-        "",
-        f"- Signals reviewed: {len(signals)}",
-        f"- Critical alerts: {len(critical)}",
-        f"- Delivery mode: local Markdown digest",
-        "",
-    ]
-
-    if critical:
-        lines.extend(["## Critical Alerts", ""])
-        for signal in critical:
-            lines.extend(_signal_block(signal))
-
-    lines.extend(["## Ranked Signals", ""])
-    for signal in top_signals:
-        lines.extend(_signal_block(signal))
-
-    lines.extend(["## Agent Trace", ""])
-    for event in events:
-        meta = f" {event.metadata}" if event.metadata else ""
-        lines.append(f"- {event.agent}: {event.message}{meta}")
-    lines.append("")
-    return "\n".join(lines)
-
-
-def _signal_block(signal: Signal) -> list[str]:
-    source = signal.source
-    if signal.published_at:
-        source = f"{source}, {signal.published_at}"
-    duplicate_note = f" ({signal.duplicate_count} related item{'s' if signal.duplicate_count != 1 else ''})" if signal.duplicate_count else ""
-    lines = [
-        f"### {signal.score}/100 - {signal.title}",
-        "",
-        f"- Urgency: {signal.urgency}",
-        f"- Event type: {signal.event_type}{duplicate_note}",
-        f"- Source: {source}",
-    ]
-    if signal.url:
-        lines.append(f"- Link: {signal.url}")
-    lines.extend(
-        [
-            "",
-            f"Summary: {signal.short_summary or signal.summary}",
-            "",
-            f"Expanded summary: {signal.expanded_summary or signal.short_summary or signal.summary}",
-            "",
-            f"Why it matters: {signal.why_it_matters}",
-            "",
-        ]
-    )
-    if signal.scout_note:
-        lines.extend([f"Scout note: {signal.scout_note}", ""])
-    lines.append("")
-    return lines
