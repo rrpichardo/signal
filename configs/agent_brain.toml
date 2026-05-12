@@ -135,35 +135,51 @@ enable_critic = true
 max_critic_rounds = 1
 critic_score_threshold = 70
 
-[scoring.freshness]
-# Newer stories score higher.
-within_1_day = 20
-within_3_days = 17
-within_7_days = 13
-older = 8
-unknown = 10
-
-[scoring.max_points]
-# These are the caps for the base code rubric.
+[scoring.components]
+# 5 components. Sum must equal 100.
 priority_match = 25
-major_player = 15
+company_match = 25
+recency = 15
+event_strength = 25
 corroboration = 10
-repeat_penalty = 20
-low_value_penalty = 15
 
-[scoring.event_strength]
-# Different kinds of stories can start stronger or weaker.
-default = 8
-platform_shift = 18
-competitor_move = 17
-regulatory_risk = 18
-asset_risk = 18
-infrastructure_signal = 16
-market_opportunity = 15
-startup_signal = 14
-builder_tactic = 11
-industry_signal = 10
-general_signal = 8
+[scoring.recency_bands]
+within_1_day = 15
+within_3_days = 12
+within_7_days = 9
+older = 6
+unknown = 7
+
+[scoring.event_strength_bands]
+none = 0
+opinion_or_listicle = 5
+useful_analysis = 10
+product_update_or_signal = 15
+launch_funding_regulation = 20
+major_platform_shift = 25
+
+[scoring.priority_match_bands]
+no_match = 0
+weak_incidental = 5
+one_relevant_not_central = 10
+one_central_or_two_weak = 15
+one_central_with_support = 20
+direct_high_impact = 25
+
+[scoring.company_match_bands]
+no_match = 0
+one_passing = 5
+relevant_not_central = 10
+watchlist_central = 15
+watchlist_in_title_or_lede = 20
+watchlist_strategic_action = 25
+
+[scoring.corroboration_bands]
+single = 0
+same_source_repeated = 3
+two_independent = 5
+three_or_more_independent = 8
+broad_cross_type = 10
 
 # Dashboard display preferences. Edit here, save, and the digest reflects the new settings.
 # page_size = number of signal cards shown per page in the dashboard (1-100).
@@ -172,18 +188,3 @@ general_signal = 8
 [display]
 page_size = 10
 default_scope = "latest"
-
-[scoring]
-# If an article looks like this kind of content, it gets a low-value penalty.
-low_value_phrases = [
-  "webinar",
-  "conference",
-  "register now",
-  "sponsored",
-  "sponsor",
-  "course",
-  "top 10",
-  "roundup",
-  "job opening",
-  "we are hiring",
-]

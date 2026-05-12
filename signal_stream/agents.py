@@ -37,14 +37,6 @@ URGENCY_TERMS = [
     "regulatory",
 ]
 
-EVENT_KEYWORDS = {
-    "platform_shift": ["model", "platform", "API", "agent", "agents", "developer", "enterprise", "pricing", "release", "launch"],
-    "startup_signal": ["funding", "seed", "Series A", "Series B", "startup", "valuation", "venture", "YC", "acquisition", "acquires"],
-    "infrastructure_signal": ["NVIDIA", "GPU", "chip", "compute", "cloud", "inference", "training", "data center", "latency"],
-    "regulatory_risk": ["regulation", "regulatory", "policy", "copyright", "privacy", "security", "safety", "EU AI Act", "compliance", "lawsuit"],
-    "builder_tactic": ["architecture", "engineering", "RAG", "fine-tuning", "eval", "evaluation", "prompt", "workflow", "case study"],
-}
-
 
 @dataclass
 class AgentContext:
@@ -206,63 +198,6 @@ class EntityAgent:
         return insights
 
 
-class RelevanceAgent:
-    name = "RelevanceAgent"
-
-    def run(self, ctx: AgentContext, insights: list[ClusterInsight]) -> list[SignalDraft]:
-        drafts: list[SignalDraft] = []
-        for insight in insights:
-            matched_priorities = []
-            score = 7.0
-            for priority in ctx.config.priorities:
-                hits = phrase_hits(insight.text, priority.keywords)
-                if not hits:
-                    continue
-                adjustment = ctx.priority_adjustments.get(priority.name, 0.0)
-                effective_weight = max(0.3, priority.weight + adjustment)
-                points = min(26.0, 5.5 * len(hits) * effective_weight)
-                score += points
-                matched_priorities.append(
-                    {
-                        "name": priority.name,
-                        "hits": hits[:8],
-                        "points": round(points, 1),
-                    }
-                )
-
-            competitor_hits = insight.entities.get("competitors", [])
-            market_hits = insight.entities.get("markets", [])
-            urgency_hits = phrase_hits(insight.text, URGENCY_TERMS)
-            event_type = _event_type(insight.text, competitor_hits)
-
-            score += min(18.0, 7.0 * len(competitor_hits))
-            score += min(14.0, 4.0 * len(market_hits))
-            score += min(20.0, 6.0 * len(urgency_hits))
-            score += min(8.0, 3.0 * (len(insight.cluster.articles) - 1))
-            if event_type in {"asset_risk", "regulatory_risk"}:
-                score += 8.0
-            elif event_type == "competitor_move":
-                score += 5.0
-
-            final_score = max(0, min(100, round(score)))
-            urgency = _urgency(final_score, urgency_hits, ctx.config.critical_threshold)
-            drafts.append(
-                SignalDraft(
-                    cluster=insight.cluster,
-                    entities=insight.entities,
-                    matched_priorities=matched_priorities,
-                    event_type=event_type,
-                    score=final_score,
-                    urgency=urgency,
-                    text=insight.text,
-                )
-            )
-
-        drafts.sort(key=lambda item: (item.score, len(item.cluster.articles)), reverse=True)
-        ctx.trace.add(self.name, "Scored clusters against strategic priorities.", signals=len(drafts))
-        return drafts
-
-
 class BriefingAgent:
     name = "BriefingAgent"
 
@@ -333,29 +268,6 @@ def _cluster_text(cluster: Cluster) -> str:
     for article in cluster.articles:
         parts.append(f"{article.title}. {article.body}")
     return normalize_space(" ".join(parts))
-
-
-def _event_type(text: str, competitor_hits: list[str]) -> str:
-    best_type = "general_signal"
-    best_hits = 0
-    for event_type, keywords in EVENT_KEYWORDS.items():
-        hit_count = len(phrase_hits(text, keywords))
-        if hit_count > best_hits:
-            best_type = event_type
-            best_hits = hit_count
-    if competitor_hits and best_type == "general_signal":
-        return "competitor_move"
-    return best_type
-
-
-def _urgency(score: int, urgency_hits: list[str], critical_threshold: int) -> str:
-    if score >= critical_threshold or (score >= 72 and len(urgency_hits) >= 2):
-        return "critical"
-    if score >= 68:
-        return "high"
-    if score >= 42:
-        return "medium"
-    return "low"
 
 
 def _heuristic_why(draft: SignalDraft) -> str:

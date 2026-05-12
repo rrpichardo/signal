@@ -5,13 +5,45 @@ from email.utils import parsedate_to_datetime
 import json
 from typing import Any
 
-from .agents import ClusterAgent, EntityAgent, RelevanceAgent
+from .agents import ClusterAgent, EntityAgent
 from .llm import BrainClient
-from .models import AgentRunLog, Article, ClusterInsight, Signal, SignalConfig, stable_id
+from .models import AgentRunLog, Article, ClusterInsight, Signal, SignalConfig, SignalDraft, stable_id
 from .orchestrator import render_digest
 from .prompt_loader import DEFAULT_SCORING_RUBRIC
 from .storage import SignalStorage
-from .text import first_sentences, normalize_space
+from .text import first_sentences, normalize_space, phrase_hits
+
+
+# ---------------------------------------------------------------------------
+# Event-type classification (moved here from agents.py — Wave 3)
+# ---------------------------------------------------------------------------
+
+# Keywords that determine which event-type bucket a story falls into.
+# The bucket with the most hits wins. If no bucket wins and competitors
+# are mentioned, the story becomes a "competitor_move".
+EVENT_KEYWORDS: dict[str, list[str]] = {
+    "platform_shift": ["model", "platform", "API", "agent", "agents", "developer", "enterprise", "pricing", "release", "launch"],
+    "startup_signal": ["funding", "seed", "Series A", "Series B", "startup", "valuation", "venture", "YC", "acquisition", "acquires"],
+    "infrastructure_signal": ["NVIDIA", "GPU", "chip", "compute", "cloud", "inference", "training", "data center", "latency"],
+    "regulatory_risk": ["regulation", "regulatory", "policy", "copyright", "privacy", "security", "safety", "EU AI Act", "compliance", "lawsuit"],
+    "builder_tactic": ["architecture", "engineering", "RAG", "fine-tuning", "eval", "evaluation", "prompt", "workflow", "case study"],
+}
+
+# Strategic verb phrases used by _score_company_match to detect high-impact
+# watchlist stories (e.g. "Anthropic acquires X" or "OpenAI launches Y").
+_STRATEGIC_VERBS: frozenset[str] = frozenset([
+    "acquires", "acquisition", "launches", "releases", "announces",
+    "partners", "partnership", "raises", "ipo", "open-sources",
+    "shutting down", "lays off", "hired", "appoints",
+])
+
+# Low-value content markers — applied by _score_event_strength to detect
+# promotional, roundup, and opinion pieces.
+_LOW_VALUE_PHRASES: frozenset[str] = frozenset([
+    "top 10", "best of", "roundup", "listicle", "webinar",
+    "register now", "sponsored", "job opening", "we are hiring",
+    "newsletter", "conference",
+])
 
 
 ANALYST_REVIEW_SCHEMA = {
@@ -73,16 +105,17 @@ def analyze_articles(
     normalized = _dedupe_exact(articles)
     clusters = ClusterAgent().run(ctx, normalized)
     insights = EntityAgent().run(ctx, clusters)
-    drafts = RelevanceAgent().run(ctx, insights)
+    # Build drafts directly — no RelevanceAgent. Scoring happens below via
+    # _base_score_card, which is the single source of truth for Signal.score.
+    drafts = build_drafts_from_insights(ctx, insights)
 
     behavior = behavior or {}
+    rubric = scoring_rubric or DEFAULT_SCORING_RUBRIC
     signals = []
     review_context: dict[str, dict[str, Any]] = {}
     for draft in drafts:
         article = draft.cluster.articles[0]
-        event_type = _theme(draft, insights)
-        memory_hits = storage.memory_matches(f"{article.title} {article.body}", limit=3)
-        score, score_breakdown = _base_score_card(article, draft, memory_hits, event_type, scoring_rubric or DEFAULT_SCORING_RUBRIC, behavior)
+        score, score_breakdown = _base_score_card(article, draft, rubric)
         # Code-path fallback: hand the LLM raw material, not a heuristic summary.
         # The Analyst prompt specifies exactly how to rewrite this into proper prose.
         # When the brain is unavailable the raw excerpt is shown as-is — honest fallback.
@@ -90,7 +123,7 @@ def analyze_articles(
         expanded_summary = "" if behavior.get("summary_mode") == "short_only" else first_sentences(article.body, max_sentences=4, max_chars=600)
         visuals_mode = str(behavior.get("visuals_mode", "image_icon"))
         image_url = str(article.raw.get("image_url", "")) if visuals_mode == "image_icon" else ""
-        icon_key = _icon_key(event_type) if visuals_mode != "none" else ""
+        icon_key = _icon_key(draft.event_type) if visuals_mode != "none" else ""
         signal = Signal(
             id=stable_id(draft.cluster.id, article.title, score, prefix="sig"),
             cluster_id=draft.cluster.id,
@@ -101,7 +134,7 @@ def analyze_articles(
             published_at=article.published_at,
             score=score,
             urgency=_urgency(score, config.critical_threshold),
-            event_type=event_type,
+            event_type=draft.event_type,
             summary=short_summary,
             why_it_matters="",  # LLM Analyst writes this; Critic flags it if empty.
             next_steps=[],
@@ -206,15 +239,6 @@ def _urgency(score: int, critical_threshold: int) -> str:
     if score >= 45:
         return "medium"
     return "low"
-
-
-def _theme(draft: Any, insights: list[ClusterInsight]) -> str:
-    if draft.event_type != "general_signal":
-        return draft.event_type
-    if draft.entities.get("competitors"):
-        return "platform_shift"
-    return "industry_signal"
-
 
 
 def _signal_json(signal: Signal) -> dict[str, Any]:
@@ -419,59 +443,250 @@ def _repair_lazy_summary(
     }
 
 
+def _event_type(text: str, competitor_hits: list[str]) -> str:
+    """Classify a story into one of our event-type buckets.
+
+    Plain English: the bucket with the most keyword matches wins.
+    Falls back to competitor_move when competitors are named but no bucket
+    dominates, and to general_signal when there are no strong signals.
+    """
+    best_type = "general_signal"
+    best_hits = 0
+    for etype, keywords in EVENT_KEYWORDS.items():
+        hit_count = len(phrase_hits(text, keywords))
+        if hit_count > best_hits:
+            best_type = etype
+            best_hits = hit_count
+    if competitor_hits and best_type == "general_signal":
+        return "competitor_move"
+    return best_type
+
+
+def _match_priorities(
+    text: str,
+    priorities: list,  # list[Priority]
+    priority_adjustments: dict[str, float],
+) -> list[dict[str, Any]]:
+    """Return weighted keyword hits for each priority group that matches.
+
+    Plain English: for every configured priority, count how many of its
+    keywords appear in the text. Feedback adjustments shift the weight up or
+    down. Only groups with at least one hit are returned.
+    """
+    matched = []
+    for priority in priorities:
+        hits = phrase_hits(text, priority.keywords)
+        if not hits:
+            continue
+        adjustment = priority_adjustments.get(priority.name, 0.0)
+        effective_weight = max(0.3, priority.weight + adjustment)
+        matched.append({
+            "name": priority.name,
+            "hits": hits[:8],
+            "raw_count": len(hits),
+            "weight": round(effective_weight, 2),
+        })
+    return matched
+
+
+def build_drafts_from_insights(
+    ctx: Any,
+    insights: list[ClusterInsight],
+) -> list[SignalDraft]:
+    """Build SignalDraft objects without scoring.
+
+    Shared by the agentic path (analyze_articles) and the legacy orchestrator.
+    Scoring — the single source of truth — happens downstream via _base_score_card.
+    """
+    drafts = []
+    for insight in insights:
+        text = insight.text
+        competitor_hits = insight.entities.get("competitors", [])
+        matched_priorities = _match_priorities(text, ctx.config.priorities, ctx.priority_adjustments)
+        etype = _event_type(text, competitor_hits)
+        drafts.append(SignalDraft(
+            cluster=insight.cluster,
+            entities=insight.entities,
+            matched_priorities=matched_priorities,
+            event_type=etype,
+            text=text,
+        ))
+    return drafts
+
+
 def _base_score_card(
     article: Article,
     draft: Any,
-    memory_hits: list[dict[str, Any]],
-    event_type: str,
     scoring_rubric: dict[str, Any],
-    behavior: dict[str, Any],
 ) -> tuple[int, list[dict[str, Any]]]:
-    """Build Analyst's explicit base rubric.
+    """5-component explicit scoring rubric. Max 100 points.
 
-    Plain English: the code cannot "understand" nuance like an LLM, so it uses
-    visible clues that often correlate with importance. The model can then
-    review this scorecard and disagree when the meaning of the story warrants it.
+    Components and caps: priority match (25), company match (25),
+    recency (15), event strength (25), corroboration (10).
+
+    Plain English: this is the single source of truth for Signal.score.
+    No memory penalty, no repeat penalty, no double-counting with a
+    separate RelevanceAgent. The model Analyst can still adjust the score
+    up or down inside the limit set in the brain file.
     """
+    pm_band, pm_pts = _score_priority_match(
+        draft.matched_priorities,
+        dict(scoring_rubric.get("priority_match_bands", {})),
+    )
+    cm_band, cm_pts = _score_company_match(
+        article,
+        draft,
+        dict(scoring_rubric.get("company_match_bands", {})),
+    )
+    rec_band, rec_pts = _score_recency(
+        article,
+        dict(scoring_rubric.get("recency_bands", {})),
+    )
+    es_band, es_pts = _score_event_strength(
+        article,
+        draft,
+        dict(scoring_rubric.get("event_strength_bands", {})),
+    )
+    corr_band, corr_pts = _score_corroboration(
+        draft,
+        dict(scoring_rubric.get("corroboration_bands", {})),
+    )
 
-    duplicate_count = max(0, len(draft.cluster.articles) - 1)
-    freshness = _freshness_points(article.published_at, scoring_rubric)
-    max_points = dict(scoring_rubric.get("max_points", {}))
-    priority_match = min(int(max_points.get("priority_match", 25)), round(sum(float(item.get("points", 0.0)) for item in draft.matched_priorities[:2])))
-    competitor_hits = len({item.lower() for item in draft.entities.get("competitors", [])})
-    organization_hits = len({item.lower() for item in draft.entities.get("organizations", [])})
-    major_players = min(int(max_points.get("major_player", 15)), (competitor_hits * 7) + max(0, organization_hits - competitor_hits) * 2)
-    event_strength = int(dict(scoring_rubric.get("event_strength", {})).get(event_type, dict(scoring_rubric.get("event_strength", {})).get("default", 8)))
-    corroboration = min(int(max_points.get("corroboration", 10)), duplicate_count * 3 + (2 if duplicate_count else 0))
-    repeat_step = _repeat_penalty_step(str(behavior.get("repeat_penalty_strength", "strong")))
-    repeat_penalty = -min(int(max_points.get("repeat_penalty", 20)), len(memory_hits) * repeat_step)
-    low_value_penalty = -int(max_points.get("low_value_penalty", 15)) if _looks_low_value(article, scoring_rubric) else 0
-
+    priority_names = ", ".join(item["name"] for item in draft.matched_priorities[:2]) or "none"
     breakdown = [
-        _score_line("Freshness", freshness, _freshness_reason(article.published_at)),
-        _score_line("Priority match", priority_match, _priority_reason(draft)),
-        _score_line("Major-player involvement", major_players, _major_player_reason(draft)),
-        _score_line("Event strength", event_strength, f"Classified as {event_type.replace('_', ' ')}."),
-        _score_line("Corroboration", corroboration, f"{duplicate_count + 1} article(s) in this coverage cluster."),
-        _score_line("Repeat penalty", repeat_penalty, f"{len(memory_hits)} recent memory hit(s) suggest possible repetition."),
-        _score_line("Low-value content penalty", low_value_penalty, _low_value_reason(article, scoring_rubric)),
+        _score_line("Priority match", pm_pts, f"Band: {pm_band}. Matched: {priority_names}."),
+        _score_line("Company match", cm_pts, f"Band: {cm_band}."),
+        _score_line("Recency", rec_pts, f"Band: {rec_band}."),
+        _score_line("Event strength", es_pts, f"Band: {es_band}. Classified as {draft.event_type.replace('_', ' ')}."),
+        _score_line("Corroboration", corr_pts, f"Band: {corr_band}. {len(draft.cluster.articles)} article(s) in this coverage cluster."),
     ]
-    total = sum(int(item["points"]) for item in breakdown)
+    total = sum(item["points"] for item in breakdown)
     return max(0, min(100, total)), breakdown
 
 
-def _freshness_points(published_at: str, scoring_rubric: dict[str, Any]) -> int:
-    freshness = dict(scoring_rubric.get("freshness", {}))
-    age = _article_age_days(published_at)
+def _score_priority_match(
+    matched_priorities: list[dict[str, Any]],
+    bands: dict[str, int],
+) -> tuple[str, int]:
+    """Map weighted keyword intensity to a priority-match band.
+
+    Intensity = max(weight × raw_count) across matched groups.
+    Higher-weight groups reach top bands with fewer hits than low-weight groups.
+    """
+    if not matched_priorities:
+        return "no_match", bands.get("no_match", 0)
+    intensity = max(item["weight"] * item["raw_count"] for item in matched_priorities)
+    if intensity >= 20:
+        return "direct_high_impact", bands.get("direct_high_impact", 25)
+    if intensity >= 14:
+        return "one_central_with_support", bands.get("one_central_with_support", 20)
+    if intensity >= 7:
+        return "one_central_or_two_weak", bands.get("one_central_or_two_weak", 15)
+    if intensity >= 3:
+        return "one_relevant_not_central", bands.get("one_relevant_not_central", 10)
+    return "weak_incidental", bands.get("weak_incidental", 5)
+
+
+def _score_company_match(
+    article: Article,
+    draft: Any,
+    bands: dict[str, int],
+) -> tuple[str, int]:
+    """Score how prominently a watchlist company features in the story.
+
+    Draft.entities["competitors"] already contains only the companies that
+    matched our watchlist, so we only need to check position and strategic verbs.
+    """
+    competitors = draft.entities.get("competitors", [])
+    if not competitors:
+        return "no_match", bands.get("no_match", 0)
+
+    title_lower = article.title.lower()
+    text_lower = f"{article.title} {article.body}".lower()
+
+    # Title mention + a strategic verb = the story is directly about this company acting
+    for comp in competitors:
+        if comp.lower() in title_lower:
+            has_strategic = any(verb in text_lower for verb in _STRATEGIC_VERBS)
+            if has_strategic:
+                return "watchlist_strategic_action", bands.get("watchlist_strategic_action", 25)
+            return "watchlist_in_title_or_lede", bands.get("watchlist_in_title_or_lede", 20)
+
+    # Multiple distinct watchlist companies in the body = central theme
+    if len({c.lower() for c in competitors}) >= 2:
+        return "watchlist_central", bands.get("watchlist_central", 15)
+
+    # Single company: judge by mention count
+    hit_count = text_lower.count(competitors[0].lower())
+    if hit_count >= 3:
+        return "relevant_not_central", bands.get("relevant_not_central", 10)
+    return "one_passing", bands.get("one_passing", 5)
+
+
+def _score_recency(
+    article: Article,
+    bands: dict[str, int],
+) -> tuple[str, int]:
+    """Map article age to a recency band."""
+    age = _article_age_days(article.published_at)
     if age is None:
-        return int(freshness.get("unknown", 10))
+        return "unknown", bands.get("unknown", 7)
     if age <= 1:
-        return int(freshness.get("within_1_day", 20))
+        return "within_1_day", bands.get("within_1_day", 15)
     if age <= 3:
-        return int(freshness.get("within_3_days", 17))
+        return "within_3_days", bands.get("within_3_days", 12)
     if age <= 7:
-        return int(freshness.get("within_7_days", 13))
-    return int(freshness.get("older", 8))
+        return "within_7_days", bands.get("within_7_days", 9)
+    return "older", bands.get("older", 6)
+
+
+def _score_event_strength(
+    article: Article,
+    draft: Any,
+    bands: dict[str, int],
+) -> tuple[str, int]:
+    """Map event type + low-value check to a strength band.
+
+    Low-value filter runs first: promotional, roundup, and opinion content
+    gets capped at 5 regardless of event type.
+    """
+    text_lower = f"{article.title} {article.body}".lower()
+
+    # Low-value content gets a hard cap
+    if any(phrase in text_lower for phrase in _LOW_VALUE_PHRASES):
+        return "opinion_or_listicle", bands.get("opinion_or_listicle", 5)
+
+    etype = draft.event_type
+    # Platform launches with an explicit launch verb = strongest signal
+    if etype == "platform_shift" and any(
+        kw in text_lower for kw in ["launch", "release", "announces", "new model", "frontier"]
+    ):
+        return "major_platform_shift", bands.get("major_platform_shift", 25)
+    if etype in {"regulatory_risk", "startup_signal"}:
+        return "launch_funding_regulation", bands.get("launch_funding_regulation", 20)
+    if etype in {"platform_shift", "competitor_move", "infrastructure_signal", "market_opportunity"}:
+        return "product_update_or_signal", bands.get("product_update_or_signal", 15)
+    # builder_tactic, industry_signal, general_signal
+    return "useful_analysis", bands.get("useful_analysis", 10)
+
+
+def _score_corroboration(
+    draft: Any,
+    bands: dict[str, int],
+) -> tuple[str, int]:
+    """Score how many independent sources cover the same story."""
+    articles = draft.cluster.articles
+    distinct_sources = len({a.source for a in articles})
+
+    if distinct_sources <= 1 and len(articles) <= 1:
+        return "single", bands.get("single", 0)
+    if distinct_sources <= 1:
+        return "same_source_repeated", bands.get("same_source_repeated", 3)
+    if distinct_sources == 2:
+        return "two_independent", bands.get("two_independent", 5)
+    if distinct_sources == 3:
+        return "three_or_more_independent", bands.get("three_or_more_independent", 8)
+    return "broad_cross_type", bands.get("broad_cross_type", 10)
 
 
 def _article_age_days(published_at: str) -> int | None:
@@ -479,48 +694,6 @@ def _article_age_days(published_at: str) -> int | None:
     if not parsed:
         return None
     return max(0, (datetime.now(timezone.utc) - parsed).days)
-
-
-def _freshness_reason(published_at: str) -> str:
-    age = _article_age_days(published_at)
-    if age is None:
-        return "Publication date unclear, so freshness gets a neutral score."
-    if age <= 1:
-        return "Published within the last day."
-    if age <= 3:
-        return "Published within the last 3 days."
-    if age <= 7:
-        return "Published within the last week."
-    return "Older than a week, so freshness score is reduced."
-
-
-def _priority_reason(draft: Any) -> str:
-    if not draft.matched_priorities:
-        return "Did not clearly match configured priority themes."
-    names = ", ".join(item.get("name", "Unnamed priority") for item in draft.matched_priorities[:2])
-    return f"Matched {names}."
-
-
-def _major_player_reason(draft: Any) -> str:
-    competitors = draft.entities.get("competitors", [])
-    organizations = draft.entities.get("organizations", [])
-    if competitors:
-        return f"Involves known major players: {', '.join(competitors[:3])}."
-    if organizations:
-        return f"Mentions named organizations: {', '.join(organizations[:3])}."
-    return "No major known player was detected."
-
-
-def _looks_low_value(article: Article, scoring_rubric: dict[str, Any]) -> bool:
-    text = f"{article.title} {article.body}".lower()
-    phrases = [str(item).lower() for item in scoring_rubric.get("low_value_phrases", [])]
-    return any(phrase in text for phrase in phrases)
-
-
-def _low_value_reason(article: Article, scoring_rubric: dict[str, Any]) -> str:
-    if _looks_low_value(article, scoring_rubric):
-        return "Looks like promotional, roundup, or low-signal content."
-    return "No obvious low-value or promotional pattern detected."
 
 
 def _score_line(name: str, points: int, reason: str) -> dict[str, Any]:
@@ -592,14 +765,6 @@ def _merge_entities(existing: dict[str, list[str]], model_entities: Any, behavio
                 bucket.append(text)
                 seen.add(text.lower())
     return merged
-
-
-def _repeat_penalty_step(strength: str) -> int:
-    if strength == "light":
-        return 5
-    if strength == "medium":
-        return 8
-    return 12
 
 
 def _icon_key(event_type: str) -> str:

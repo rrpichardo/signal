@@ -19,45 +19,52 @@ DEFAULT_PROMPTS = {
 }
 
 DEFAULT_SCORING_RUBRIC: dict[str, Any] = {
-    "freshness": {
-        "within_1_day": 20,
-        "within_3_days": 17,
-        "within_7_days": 13,
-        "older": 8,
-        "unknown": 10,
-    },
-    "max_points": {
+    # 5 components. Values are max points; they must sum to 100.
+    "components": {
         "priority_match": 25,
-        "major_player": 15,
+        "company_match": 25,
+        "recency": 15,
+        "event_strength": 25,
         "corroboration": 10,
-        "repeat_penalty": 20,
-        "low_value_penalty": 15,
     },
-    "event_strength": {
-        "default": 8,
-        "platform_shift": 18,
-        "competitor_move": 17,
-        "regulatory_risk": 18,
-        "asset_risk": 18,
-        "infrastructure_signal": 16,
-        "market_opportunity": 15,
-        "startup_signal": 14,
-        "builder_tactic": 11,
-        "industry_signal": 10,
-        "general_signal": 8,
+    "recency_bands": {
+        "within_1_day": 15,
+        "within_3_days": 12,
+        "within_7_days": 9,
+        "older": 6,
+        "unknown": 7,
     },
-    "low_value_phrases": [
-        "webinar",
-        "conference",
-        "register now",
-        "sponsored",
-        "sponsor",
-        "course",
-        "top 10",
-        "roundup",
-        "job opening",
-        "we are hiring",
-    ],
+    "event_strength_bands": {
+        "none": 0,
+        "opinion_or_listicle": 5,
+        "useful_analysis": 10,
+        "product_update_or_signal": 15,
+        "launch_funding_regulation": 20,
+        "major_platform_shift": 25,
+    },
+    "priority_match_bands": {
+        "no_match": 0,
+        "weak_incidental": 5,
+        "one_relevant_not_central": 10,
+        "one_central_or_two_weak": 15,
+        "one_central_with_support": 20,
+        "direct_high_impact": 25,
+    },
+    "company_match_bands": {
+        "no_match": 0,
+        "one_passing": 5,
+        "relevant_not_central": 10,
+        "watchlist_central": 15,
+        "watchlist_in_title_or_lede": 20,
+        "watchlist_strategic_action": 25,
+    },
+    "corroboration_bands": {
+        "single": 0,
+        "same_source_repeated": 3,
+        "two_independent": 5,
+        "three_or_more_independent": 8,
+        "broad_cross_type": 10,
+    },
 }
 
 # Display preferences shown on the dashboard Digest page.
@@ -76,7 +83,6 @@ DEFAULT_BEHAVIOR_SETTINGS: dict[str, Any] = {
     "model_score_adjustment_limit": 20,
     "summary_mode": "short_expanded",
     "visuals_mode": "image_icon",
-    "repeat_penalty_strength": "strong",
     "entity_extraction": "hybrid",
     "analyst_review_limit": 8,
     "analyst_full_review": False,
@@ -116,15 +122,10 @@ def load_scoring_rubric(path: str | Path | None) -> dict[str, Any]:
         return rubric
 
     scoring = raw.get("scoring", {})
-    _merge_int_section(rubric["freshness"], scoring.get("freshness", {}))
-    _merge_int_section(rubric["max_points"], scoring.get("max_points", {}))
-    _merge_int_section(rubric["event_strength"], scoring.get("event_strength", {}))
-
-    phrases = scoring.get("low_value_phrases")
-    if isinstance(phrases, list):
-        cleaned = [str(item).strip().lower() for item in phrases if str(item).strip()]
-        if cleaned:
-            rubric["low_value_phrases"] = cleaned
+    # 5-component rubric sections — each is a flat int dict
+    for section in ("components", "recency_bands", "event_strength_bands",
+                    "priority_match_bands", "company_match_bands", "corroboration_bands"):
+        _merge_int_section(rubric[section], scoring.get(section, {}))
     return rubric
 
 
@@ -143,7 +144,6 @@ def load_behavior_settings(path: str | Path | None) -> dict[str, Any]:
         "relevance_policy",
         "summary_mode",
         "visuals_mode",
-        "repeat_penalty_strength",
         "entity_extraction",
     }
     for key in text_keys:
@@ -241,12 +241,9 @@ def save_brain_file(path: str | Path, brain: dict[str, Any]) -> None:
 
     scoring = deepcopy(existing.get("scoring") or DEFAULT_SCORING_RUBRIC)
     incoming_scoring = dict(brain.get("scoring") or {})
-    _merge_int_section(scoring["freshness"], incoming_scoring.get("freshness", {}))
-    _merge_int_section(scoring["max_points"], incoming_scoring.get("max_points", {}))
-    _merge_int_section(scoring["event_strength"], incoming_scoring.get("event_strength", {}))
-    phrases = incoming_scoring.get("low_value_phrases")
-    if isinstance(phrases, list):
-        scoring["low_value_phrases"] = [str(item).strip().lower() for item in phrases if str(item).strip()]
+    for section in ("components", "recency_bands", "event_strength_bands",
+                    "priority_match_bands", "company_match_bands", "corroboration_bands"):
+        _merge_int_section(scoring[section], incoming_scoring.get(section, {}))
 
     behavior = dict(existing.get("behavior") or DEFAULT_BEHAVIOR_SETTINGS)
     behavior.update(dict(brain.get("behavior") or {}))
@@ -331,7 +328,6 @@ def _render_brain_toml(
             f"analyst_full_review = {_toml_bool(behavior.get('analyst_full_review', False))}",
             f'summary_mode = "{_toml_text(behavior.get("summary_mode", "short_expanded"))}"',
             f'visuals_mode = "{_toml_text(behavior.get("visuals_mode", "image_icon"))}"',
-            f'repeat_penalty_strength = "{_toml_text(behavior.get("repeat_penalty_strength", "strong"))}"',
             f'entity_extraction = "{_toml_text(behavior.get("entity_extraction", "hybrid"))}"',
             # Critic-loop switches live next to the other behavior knobs so a non-
             # technical editor can flip them in one place.
@@ -339,26 +335,29 @@ def _render_brain_toml(
             f"max_critic_rounds = {int(behavior.get('max_critic_rounds', 1))}",
             f"critic_score_threshold = {int(behavior.get('critic_score_threshold', 70))}",
             "",
-            "[scoring.freshness]",
-            "# Newer stories score higher.",
         ]
     )
-    for key in ("within_1_day", "within_3_days", "within_7_days", "older", "unknown"):
-        lines.append(f"{key} = {int(dict(scoring.get('freshness', {})).get(key, DEFAULT_SCORING_RUBRIC['freshness'][key]))}")
 
-    lines.extend(["", "[scoring.max_points]", "# These are the caps for the base code rubric."])
-    for key in ("priority_match", "major_player", "corroboration", "repeat_penalty", "low_value_penalty"):
-        lines.append(f"{key} = {int(dict(scoring.get('max_points', {})).get(key, DEFAULT_SCORING_RUBRIC['max_points'][key]))}")
-
-    lines.extend(["", "[scoring.event_strength]", "# Different kinds of stories can start stronger or weaker."])
-    event_strength = dict(scoring.get("event_strength", {}))
-    for key in DEFAULT_SCORING_RUBRIC["event_strength"]:
-        lines.append(f"{key} = {int(event_strength.get(key, DEFAULT_SCORING_RUBRIC['event_strength'][key]))}")
-
-    lines.extend(["", "[scoring]", "# If an article looks like this kind of content, it gets a low-value penalty.", "low_value_phrases = ["])
-    for phrase in scoring.get("low_value_phrases", []):
-        lines.append(f'  "{_toml_text(phrase)}",')
-    lines.extend(["]", ""])
+    # 5-component scoring rubric sections
+    _scoring_sections = [
+        ("scoring.components", "components",
+         "# 5 components. Values are max points; they must sum to 100."),
+        ("scoring.recency_bands", "recency_bands",
+         "# How many points a story gets based on publication age."),
+        ("scoring.event_strength_bands", "event_strength_bands",
+         "# Strength bands for event type classification."),
+        ("scoring.priority_match_bands", "priority_match_bands",
+         "# Bands for weighted keyword intensity in priority groups."),
+        ("scoring.company_match_bands", "company_match_bands",
+         "# Bands for watchlist company prominence in the story."),
+        ("scoring.corroboration_bands", "corroboration_bands",
+         "# Bands for independent source coverage."),
+    ]
+    for toml_section, rubric_key, comment in _scoring_sections:
+        lines.extend(["", f"[{toml_section}]", comment])
+        current = dict(scoring.get(rubric_key, {}))
+        for key, default_val in DEFAULT_SCORING_RUBRIC[rubric_key].items():
+            lines.append(f"{key} = {int(current.get(key, default_val))}")
 
     # Display preferences for the dashboard digest. Editable via Settings page.
     display_safe = dict(DEFAULT_DISPLAY_SETTINGS)
