@@ -63,10 +63,14 @@ def analyze_articles(
     """
 
     articles = [_article_from_json(item) for item in articles_json]
+    # Drop anything we already ranked in a prior complete run. This is what
+    # makes the cursor + 6-hour overlap safe: the worker can over-fetch on
+    # purpose, and the seen-set kills the dupes before they reach scoring.
+    articles = [a for a in articles if not storage.is_article_seen(a.id, a.url)]
     trace = AgentRunLog()
     ctx = _Context(config=config, storage=storage, llm=BrainClient(config), trace=trace)
 
-    normalized = _dedupe_exact(articles, config.agent.max_article_age_days)
+    normalized = _dedupe_exact(articles)
     clusters = ClusterAgent().run(ctx, normalized)
     insights = EntityAgent().run(ctx, clusters)
     drafts = RelevanceAgent().run(ctx, insights)
@@ -159,11 +163,13 @@ def _article_from_json(item: dict[str, Any]) -> Article:
     )
 
 
-def _dedupe_exact(articles: list[Article], max_age_days: int) -> list[Article]:
-    """Remove exact repeats and stale daily-digest items.
+def _dedupe_exact(articles: list[Article]) -> list[Article]:
+    """Remove exact within-run repeats.
 
-    Plain English: if a feed hands us a post from last year, it should not beat
-    real current news in today's Signal Stream run.
+    Plain English: if Scout fetched two copies of the same URL in one run,
+    keep only one. Cross-run freshness is handled by the cursor (worker) and
+    storage.is_article_seen (analyst entry point), so the old "stale older
+    than N days" check no longer belongs here.
     """
 
     seen = set()
@@ -174,21 +180,9 @@ def _dedupe_exact(articles: list[Article], max_age_days: int) -> list[Article]:
         key = (article.url or article.title).lower()
         if not article.title or key in seen:
             continue
-        if _is_stale(article.published_at, max_age_days):
-            continue
         seen.add(key)
         kept.append(article)
     return kept
-
-
-def _is_stale(value: str, max_age_days: int) -> bool:
-    if max_age_days <= 0 or not value:
-        return False
-    parsed = _parse_date(value)
-    if not parsed:
-        return False
-    age = datetime.now(timezone.utc) - parsed
-    return age.days > max_age_days
 
 
 def _parse_date(value: str) -> datetime | None:

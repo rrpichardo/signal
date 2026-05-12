@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import json
 import sqlite3
+import uuid
 from typing import Any
 
 from .models import Article, Signal, ToolCall, stable_id, utc_now_iso
@@ -231,6 +232,168 @@ class SignalStorage:
                 (started_at, completed_at, len(articles), cluster_count, len(signals), output_path),
             )
 
+    def save_run_atomic(
+        self,
+        articles: list[Article],
+        signals: list[Signal],
+        cluster_count: int,
+        output_path: str,
+        started_at: str,
+        run_id: str,
+        summary: dict[str, Any] | None = None,
+    ) -> None:
+        """Persist a successful run as one atomic transaction.
+
+        Plain English: this replaces save_run() for the agentic path. Articles
+        and signals are inserted, the legacy `runs` row is added, and the
+        matching `agent_runs` row is flipped to status='complete' — all in a
+        single SQLite transaction. If any step raises, the whole thing rolls
+        back so a half-finished run never leaves articles marked "seen" by
+        accident. That guarantee is what the Wave 2 cursor relies on.
+        """
+        # Computed once so the runs/agent_runs rows share the same completion
+        # timestamp — keeps the dashboard timeline coherent.
+        completed_at = utc_now_iso()
+        summary_json = json.dumps(summary or {}, sort_keys=True)
+        # The connection context manager auto-commits on a clean exit and
+        # auto-rollbacks if any statement raises — that's exactly the atomic
+        # semantics we need without an explicit BEGIN/COMMIT.
+        with self.connect() as conn:
+            conn.executemany(
+                """
+                insert into articles (id, source, title, url, published_at, body, fetched_at, raw_json)
+                values (?, ?, ?, ?, ?, ?, ?, ?)
+                on conflict(id) do update set
+                    source=excluded.source,
+                    title=excluded.title,
+                    url=excluded.url,
+                    published_at=excluded.published_at,
+                    body=excluded.body,
+                    fetched_at=excluded.fetched_at,
+                    raw_json=excluded.raw_json
+                """,
+                [
+                    (
+                        article.id,
+                        article.source,
+                        article.title,
+                        article.url,
+                        article.published_at,
+                        article.body,
+                        article.fetched_at,
+                        json.dumps(article.raw, sort_keys=True),
+                    )
+                    for article in articles
+                ],
+            )
+            conn.executemany(
+                """
+                insert into signals (
+                    id, cluster_id, article_id, title, url, source, published_at, score, urgency, event_type,
+                    summary, short_summary, expanded_summary, why_it_matters, next_steps_json, score_breakdown_json,
+                    matched_priorities_json, entities_json, image_url, icon_key, scout_note, relevance_label,
+                    duplicate_count, created_at
+                )
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                on conflict(id) do update set
+                    score=excluded.score,
+                    urgency=excluded.urgency,
+                    summary=excluded.summary,
+                    short_summary=excluded.short_summary,
+                    expanded_summary=excluded.expanded_summary,
+                    why_it_matters=excluded.why_it_matters,
+                    next_steps_json=excluded.next_steps_json,
+                    score_breakdown_json=excluded.score_breakdown_json,
+                    matched_priorities_json=excluded.matched_priorities_json,
+                    entities_json=excluded.entities_json,
+                    image_url=excluded.image_url,
+                    icon_key=excluded.icon_key,
+                    scout_note=excluded.scout_note,
+                    relevance_label=excluded.relevance_label,
+                    duplicate_count=excluded.duplicate_count,
+                    created_at=excluded.created_at
+                """,
+                [
+                    (
+                        signal.id,
+                        signal.cluster_id,
+                        signal.article_id,
+                        signal.title,
+                        signal.url,
+                        signal.source,
+                        signal.published_at,
+                        signal.score,
+                        signal.urgency,
+                        signal.event_type,
+                        signal.summary,
+                        signal.short_summary or signal.summary,
+                        signal.expanded_summary or signal.summary,
+                        signal.why_it_matters,
+                        json.dumps(signal.next_steps),
+                        json.dumps(signal.score_breakdown, sort_keys=True),
+                        json.dumps(signal.matched_priorities, sort_keys=True),
+                        json.dumps(signal.entities, sort_keys=True),
+                        signal.image_url,
+                        signal.icon_key,
+                        signal.scout_note,
+                        signal.relevance_label,
+                        signal.duplicate_count,
+                        completed_at,
+                    )
+                    for signal in signals
+                ],
+            )
+            # Flip agent_runs.status to 'complete' inside the same transaction
+            # — this is the contract the cursor depends on. If anything above
+            # raised, this update never lands and the cursor stays put.
+            conn.execute(
+                "update agent_runs set status = ?, completed_at = ?, summary_json = ? where id = ?",
+                ("complete", completed_at, summary_json, run_id),
+            )
+
+    def latest_complete_agent_run_started_at(self) -> str | None:
+        """ISO timestamp of the most recent agent_runs row with status='complete'.
+
+        Plain English: this is the run cursor. Scout uses it to know which
+        articles count as "new." A failed or interrupted run never advances
+        it, so a partial run can't accidentally hide tomorrow's fresh stories.
+        Returns None on the very first run (no complete runs yet).
+        """
+        with self.connect() as conn:
+            row = conn.execute(
+                "select started_at from agent_runs where status = 'complete' "
+                "order by started_at desc limit 1"
+            ).fetchone()
+        return row["started_at"] if row else None
+
+    def is_article_seen(self, article_id: str, url: str) -> bool:
+        """True if this article was persisted by a prior complete run.
+
+        Plain English: the analyst checks this before scoring so we don't
+        re-rank the same article we already shipped. Match is by stable
+        article_id first, then by URL (case-insensitive) as a backstop in
+        case the id-hash changed because the source/title shifted.
+        """
+        if not article_id and not url:
+            return False
+        with self.connect() as conn:
+            if article_id:
+                row = conn.execute(
+                    "select 1 from articles where id = ? limit 1", (article_id,)
+                ).fetchone()
+                if row:
+                    return True
+            if url:
+                # Case-insensitive URL match guards against trivial casing
+                # differences between sources without doing heavy normalization.
+                row = conn.execute(
+                    "select 1 from articles where lower(url) = lower(?) limit 1",
+                    (url,),
+                ).fetchone()
+                if row:
+                    return True
+        return False
+
     def add_feedback(self, signal_id: str, label: str, note: str = "") -> None:
         allowed = {"useful", "not_useful", "critical", "irrelevant"}
         if label not in allowed:
@@ -311,15 +474,26 @@ class SignalStorage:
         }
 
     def latest_run(self) -> dict[str, Any] | None:
-        # Most recent completed run from the runs table. Used as a cursor for
-        # "latest run" scope filtering on the digest page.
+        # Most recent complete run from agent_runs. Used by the dashboard to scope
+        # the digest page to the latest run's articles.
         with self.connect() as conn:
             row = conn.execute(
-                "select id, started_at, completed_at, article_count, cluster_count, "
-                "signal_count, output_path "
-                "from runs order by started_at desc limit 1"
+                "select id, started_at, completed_at, summary_json "
+                "from agent_runs where status = 'complete' "
+                "order by started_at desc, completed_at desc, id desc limit 1"
             ).fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        summary = json.loads(row["summary_json"] or "{}")
+        return {
+            "id": row["id"],
+            "started_at": row["started_at"],
+            "completed_at": row["completed_at"],
+            "article_count": summary.get("articles", 0),
+            "cluster_count": summary.get("cluster_count", 0),
+            "signal_count": summary.get("signals", 0),
+            "output_path": summary.get("output_path", ""),
+        }
 
     def _hydrate_signal_row(self, row: Any) -> dict[str, Any]:
         # Shared post-processing for signal rows: parse JSON fields and apply UI fallbacks.
@@ -366,7 +540,7 @@ class SignalStorage:
         return adjustments
 
     def start_agent_run(self, goal: str) -> str:
-        run_id = stable_id(goal, utc_now_iso(), prefix="run")
+        run_id = f"run_{uuid.uuid4().hex[:16]}"
         with self.connect() as conn:
             conn.execute(
                 "insert into agent_runs (id, goal, status, started_at) values (?, ?, ?, ?)",

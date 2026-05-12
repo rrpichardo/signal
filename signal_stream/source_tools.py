@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 import json
 import re
@@ -15,6 +17,10 @@ from .text import clean_html, normalize_space
 
 USER_AGENT = "SignalStreamAgentic/0.1"
 YOUTUBE_VIDEO_RE = re.compile(r"(?:video:videoId|yt:videoId)$")
+# Global cap applied when a cursor is in play. The 6-hour overlap window in
+# the worker can still match more entries than the cap on chatty feeds, so we
+# keep only the freshest 20 and log a `source_capped` event for the rest.
+CURSOR_FETCH_CAP = 20
 SCOUT_ENRICH_SCHEMA = {
     "type": "object",
     "properties": {
@@ -38,11 +44,15 @@ SCOUT_ENRICH_SCHEMA = {
 }
 
 
-def fetch_source(source: SourceConfig) -> dict[str, Any]:
+def fetch_source(source: SourceConfig, published_after: datetime | None = None) -> dict[str, Any]:
     """Fetch one source and return a safe JSON result.
 
     Plain English: this is Scout's main tool. It tries a source, catches
     failures, and reports what happened instead of crashing the whole run.
+    When `published_after` is set, only entries newer than that timestamp
+    survive — that's how the cursor advances each run. On a first run (no
+    prior complete agent_runs row), `published_after` is None and the
+    source's own `limit` controls how many entries come back.
     """
 
     try:
@@ -77,13 +87,78 @@ def fetch_source(source: SourceConfig) -> dict[str, Any]:
             "confidence": 0.0,
         }
 
-    return {
+    # Apply the cursor filter + global cap after the loader returns. We do
+    # this here rather than inside each loader so RSS, JSON, and YouTube all
+    # share one definition of "what counts as new since last time."
+    filtered, capped_count = _apply_cursor_and_cap(articles, published_after, CURSOR_FETCH_CAP)
+    result: dict[str, Any] = {
         "source": source.name,
         "status": "ok",
-        "articles": [_article_json(article) for article in articles],
+        "articles": [_article_json(article) for article in filtered],
         "error": "",
-        "confidence": 0.9 if articles else 0.25,
+        "confidence": 0.9 if filtered else 0.25,
     }
+    if capped_count is not None:
+        # Surfaced by the orchestrator as a `source_capped` agent_event so the
+        # dashboard can show that this feed had more new entries than the cap.
+        result["source_capped"] = capped_count
+    return result
+
+
+def _apply_cursor_and_cap(
+    articles: list[Article],
+    published_after: datetime | None,
+    cap: int,
+) -> tuple[list[Article], int | None]:
+    """Filter to articles newer than `published_after` and apply the per-fetch cap.
+
+    Plain English: on a first run (no cursor) we trust the loader's own
+    source.limit slice and return as-is. On every later run we drop entries
+    older than the cursor, sort newest-first, and keep at most `cap` items.
+    If we had to drop entries because of the cap, the pre-cap count is
+    returned so Scout can log a `source_capped` warning.
+    """
+
+    if published_after is None:
+        return articles, None
+
+    fresh: list[Article] = []
+    for article in articles:
+        parsed = _parse_entry_date(article.published_at)
+        # Articles without a parseable date stay in — better to over-include
+        # than silently drop legitimate news because a feed used an oddball
+        # date format. The Analyst's own dedup/seen check is the safety net.
+        if parsed is None or parsed > published_after:
+            fresh.append(article)
+
+    def _sort_key(item: Article) -> datetime:
+        parsed = _parse_entry_date(item.published_at)
+        return parsed or datetime.min.replace(tzinfo=timezone.utc)
+
+    fresh.sort(key=_sort_key, reverse=True)
+
+    if len(fresh) > cap:
+        return fresh[:cap], len(fresh)
+    return fresh, None
+
+
+def _parse_entry_date(value: str) -> datetime | None:
+    """Best-effort parse of RFC 2822 (RSS) or ISO 8601 (Atom) dates."""
+
+    if not value:
+        return None
+    try:
+        parsed = parsedate_to_datetime(value)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def fetch_context(query: str, articles: list[dict[str, Any]], limit: int = 5) -> dict[str, Any]:

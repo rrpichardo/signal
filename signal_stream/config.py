@@ -80,10 +80,8 @@ def load_config(path: str | Path = "configs/demo.toml") -> SignalConfig:
         ),
         agent=AgentConfig(
             max_iterations=int(agent.get("max_iterations", 6)),
-            min_signals=int(agent.get("min_signals", 8)),
             dashboard_port=int(agent.get("dashboard_port", 8765)),
             worker_timeout_seconds=int(agent.get("worker_timeout_seconds", 1800)),
-            max_article_age_days=int(agent.get("max_article_age_days", 14)),
             brain_file=_resolve(base_dir, agent.get("brain_file") or agent.get("prompt_file"), "agent_brain.toml"),
             prompt_file=_resolve(base_dir, agent.get("brain_file") or agent.get("prompt_file"), "agent_brain.toml"),
             scout_mode=str(agent.get("scout_mode", "code")).lower(),
