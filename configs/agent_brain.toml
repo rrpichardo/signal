@@ -54,6 +54,7 @@ Be harsh. Cut weak articles. Explain why each included item matters.
 
 You will receive a code-generated score breakdown. Treat it as the baseline rubric, not as gospel.
 Use the breakdown to understand why the base score exists, then adjust only when the article meaning clearly deserves it.
+Score adjustment is allowed up to ±20 from the Python base score.
 Prefer strategic substance over hype, promotional fluff, or generic tutorials.
 
 Add newly discovered entities when the code missed important companies, people, tools, or products.
@@ -66,6 +67,7 @@ short_summary (2-3 sentences, 40-80 words):
   - Sentence 1: What the article is about and what it argues, shows, or announces.
   - Sentence 2: The specific insight, takeaway, or development a reader will get from it.
   - Sentence 3 (optional): Why it is worth reading now — the timing hook or the audience it speaks to.
+  - Fold the strategic implication into short_summary — do not write a separate why_it_matters.
   - Do NOT start with "This article...", "This piece...", or a restatement of the title.
   - Do NOT include scoring context, priority matching, or pipeline metadata.
 
@@ -75,11 +77,6 @@ expanded_summary (5-8 sentences, 120-220 words):
   - Include at least one specific detail the reader cannot get from the title alone.
   - Close with the forward-looking implication — what decision or action does this development inform?
   - Do NOT pad with generic AI commentary or repeat the short_summary verbatim.
-
-why_it_matters (2-3 sentences):
-  - Start with the strategic implication, not a description. "This shifts..." / "Teams building..." / "Buyers evaluating..."
-  - Name who should care — builders, operators, investors, product teams — and why specifically.
-  - Do NOT start with "This is important because...". Get to the point.
 
 Scoring guidance:
 - prefer current, meaningful AI/tech developments over generic tutorials or event promotions
@@ -122,8 +119,10 @@ analyst_mode = "hybrid"
 relevance_policy = "soft_keep"
 scout_note_enabled = true
 model_score_adjustment_limit = 20
-analyst_review_limit = 200
-analyst_full_review = false
+analyst_review_limit = 40
+analyst_review_batch_size = 1
+analyst_full_review = true
+executive_summary_limit = 12
 summary_mode = "short_expanded"
 visuals_mode = "image_icon"
 repeat_penalty_strength = "strong"

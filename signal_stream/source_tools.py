@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from html.parser import HTMLParser
 from pathlib import Path
 import json
 import re
@@ -180,6 +181,104 @@ def fetch_context(query: str, articles: list[dict[str, Any]], limit: int = 5) ->
         "status": "ok",
         "confidence": 0.65 if ranked else 0.2,
     }
+
+
+def fetch_full_article_page(url: str, timeout: int = 10) -> tuple[str, str | None]:
+    """Fetch an article URL and extract the main readable text + og:image.
+
+    Strategy (Option A — stdlib only): strip script/style/nav/header/footer/aside
+    tags, then return the longest contiguous text block from <article> if present,
+    else <main>, else <body>. Falls back to ("", None) on any network or parse error.
+
+    Returns:
+        (body_text, og_image_url) — body_text is "" on failure; og_image_url
+        is None when no og:image meta tag was found.
+    """
+    if not url or not url.startswith(("http://", "https://")):
+        return "", None
+    try:
+        req = request.Request(url, headers={"User-Agent": USER_AGENT})
+        with request.urlopen(req, timeout=timeout) as resp:
+            content_type = resp.headers.get("Content-Type", "")
+            if "html" not in content_type:
+                return "", None
+            raw_html = resp.read(2_000_000).decode("utf-8", errors="replace")
+    except Exception:  # noqa: BLE001 - any failure → safe fallback
+        return "", None
+
+    parser = _ArticlePageParser()
+    try:
+        parser.feed(raw_html)
+    except Exception:  # noqa: BLE001 - html.parser can raise on malformed HTML
+        return "", None
+
+    return parser.best_text(), parser.og_image
+
+
+class _ArticlePageParser(HTMLParser):
+    """Best-effort readable-text extractor. Zero deps — stdlib only."""
+
+    # Tags whose entire subtree we skip (nav/boilerplate noise).
+    _SKIP_TAGS: frozenset[str] = frozenset(["script", "style", "nav", "header", "footer", "aside", "noscript", "form"])
+    # Content-container tags we prefer over <body>.
+    _CONTAINER_PRIORITY: tuple[str, ...] = ("article", "main", "div", "section", "body")
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._skip_depth: int = 0   # nesting depth inside a skip tag
+        self._containers: dict[str, list[str]] = {tag: [] for tag in self._CONTAINER_PRIORITY}
+        self._current_containers: list[str] = []  # stack of open container tags
+        self._text_buf: list[str] = []             # text for current deepest container
+        self.og_image: str | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attr_map = dict(attrs)
+        # Capture og:image from <meta property="og:image" content="...">
+        if tag == "meta" and attr_map.get("property") == "og:image":
+            self.og_image = attr_map.get("content") or None
+
+        if self._skip_depth > 0:
+            self._skip_depth += 1
+            return
+        if tag in self._SKIP_TAGS:
+            self._skip_depth = 1
+            return
+        if tag in self._CONTAINER_PRIORITY:
+            # Save the current buffer as a candidate for the parent container,
+            # then start a fresh buffer for this container.
+            if self._current_containers:
+                parent = self._current_containers[-1]
+                self._containers[parent].append(normalize_space(" ".join(self._text_buf)))
+            self._text_buf = []
+            self._current_containers.append(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._skip_depth > 0:
+            self._skip_depth -= 1
+            return
+        if tag in self._CONTAINER_PRIORITY and self._current_containers and self._current_containers[-1] == tag:
+            container = self._current_containers.pop()
+            self._containers[container].append(normalize_space(" ".join(self._text_buf)))
+            self._text_buf = []
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth > 0:
+            return
+        text = data.strip()
+        if text:
+            self._text_buf.append(text)
+
+    def best_text(self) -> str:
+        # Flush any remaining buffer into body
+        if self._text_buf:
+            self._containers["body"].append(normalize_space(" ".join(self._text_buf)))
+        # Try containers in priority order; pick longest non-empty result.
+        for tag in self._CONTAINER_PRIORITY:
+            combined = " ".join(chunk for chunk in self._containers[tag] if chunk)
+            combined = normalize_space(combined)
+            if len(combined) >= 200:
+                return combined
+        return ""
 
 
 def enrich_articles_with_model(

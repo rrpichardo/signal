@@ -5,11 +5,13 @@ from email.utils import parsedate_to_datetime
 import json
 from typing import Any
 
+import sys
+
 from .agents import ClusterAgent, EntityAgent
 from .llm import BrainClient
-from .models import AgentRunLog, Article, ClusterInsight, Signal, SignalConfig, SignalDraft, stable_id
-from .orchestrator import render_digest
+from .models import AgentRunLog, Article, ClusterInsight, Signal, SignalConfig, SignalDraft, stable_id, utc_now_iso
 from .prompt_loader import DEFAULT_SCORING_RUBRIC
+from .source_tools import fetch_full_article_page
 from .storage import SignalStorage
 from .text import first_sentences, normalize_space, phrase_hits
 
@@ -58,10 +60,11 @@ ANALYST_REVIEW_SCHEMA = {
                     "score": {"type": "integer"},
                     "short_summary": {"type": "string"},
                     "expanded_summary": {"type": "string"},
-                    "why_it_matters": {"type": "string"},
                     "entities": {"type": "object"},
                 },
-                "required": ["id", "score", "short_summary", "expanded_summary", "why_it_matters", "entities"],
+                # why_it_matters dropped — strategic implication folded into short_summary.
+                # Keep it in storage and API for old-run compatibility.
+                "required": ["id", "score", "short_summary", "expanded_summary", "entities"],
             },
         }
     },
@@ -159,9 +162,17 @@ def analyze_articles(
             "relevance_label": article.raw.get("scout_relevance_label", "keep"),
         }
 
-    # Sort before the model pass so the dashboard's most visible cards get
-    # model-written summaries first.
+    # Sort before the model pass so the top-N fetch and model review both
+    # operate on the highest-scoring candidates first.
     signals.sort(key=lambda item: item.score, reverse=True)
+
+    # Fetch full article pages for the top-N candidates so the model reviewer
+    # gets richer text than the RSS body alone. Only the top analyst_review_limit
+    # articles are fetched; the rest stay on their RSS bodies.
+    review_limit = int(behavior.get("analyst_review_limit", 40))
+    if behavior.get("analyst_full_review"):
+        signals, review_context = _fetch_full_pages_for_top_n(signals, review_context, review_limit)
+
     signals = _apply_analyst_mode(signals, config, analyst_mode, analyst_prompt, behavior, review_context)
     signals.sort(key=lambda item: item.score, reverse=True)
     digest = render_digest(config, signals, trace.events)
@@ -290,12 +301,9 @@ def _apply_analyst_mode(
     if not llm.available():
         return signals
 
-    # The focused summary repair is the default for local models because it is
-    # fast and directly handles the visible card paragraph. Full review can be
-    # turned on later from the brain file if a stronger model is available.
     reviewed = _review_signals_in_chunks(llm, analyst_prompt, signals, behavior, review_context) if behavior.get("analyst_full_review") else {}
     updated = []
-    review_limit = int(behavior.get("analyst_review_limit", 30))
+    review_limit = int(behavior.get("analyst_review_limit", 40))
     for index, signal in enumerate(signals):
         item = reviewed.get(signal.id)
         if not item:
@@ -330,6 +338,79 @@ def _apply_analyst_mode(
     return updated
 
 
+_FULL_PAGE_MIN_CHARS = 200    # body shorter than this → keep RSS body
+_OVERSIZED_TRUNCATION = 8000  # chars — truncate then retry once on context-too-large
+
+
+def _fetch_full_pages_for_top_n(
+    signals: list[Signal],
+    review_context: dict[str, dict[str, Any]],
+    top_n: int,
+) -> tuple[list[Signal], dict[str, dict[str, Any]]]:
+    """Replace article_text in review_context with the full page body for the top-N signals.
+
+    Side-effect: if og:image is found, it is written into review_context so
+    _apply_analyst_mode can propagate it to signal.image_url (Wave 5 wires this up fully).
+    Falls back to the RSS body already in review_context when extraction fails or is too short.
+    """
+    for signal in signals[:top_n]:
+        ctx = dict(review_context.get(signal.id, {}))
+        body, og_image = fetch_full_article_page(signal.url)
+        if len(body) >= _FULL_PAGE_MIN_CHARS:
+            ctx["article_text"] = body
+        else:
+            if body:  # non-empty but short — log for visibility
+                print(
+                    f"[signal_stream] fetch_full_article_page: extraction yielded <{_FULL_PAGE_MIN_CHARS} chars for {signal.url!r}; using RSS body.",
+                    file=sys.stderr,
+                )
+        if og_image:
+            ctx["og_image"] = og_image
+        review_context[signal.id] = ctx
+    return signals, review_context
+
+
+def _chat_json_with_truncation_fallback(
+    llm: BrainClient,
+    system: str,
+    user: str,
+    schema: dict[str, Any],
+    required_fields: list[str] | None,
+) -> dict[str, Any] | None:
+    """Call chat_json; on a context-too-large error, truncate article_text to 8000 chars and retry.
+
+    Groq signals a too-large context via HTTP 400 with 'context_length_exceeded'
+    (or similar) in the error body. We detect any None return whose last_error
+    contains a size hint and retry once with the article body truncated.
+    """
+    raw = llm.chat_json(system, user, schema, required_fields=required_fields)
+    if raw is not None:
+        return raw
+    last_err = (llm.last_error or "").lower()
+    if not any(kw in last_err for kw in ("context", "too large", "length", "token", "limit")):
+        return None
+    # Parse payload, truncate article_text, retry once.
+    try:
+        payload = json.loads(user)
+        for signal_item in payload.get("signals", []):
+            text = str(signal_item.get("article_text", ""))
+            if len(text) > _OVERSIZED_TRUNCATION:
+                signal_item["article_text"] = text[:_OVERSIZED_TRUNCATION]
+                print(
+                    f"[signal_stream] Article too large for Groq; truncated to {_OVERSIZED_TRUNCATION} chars and retrying.",
+                    file=sys.stderr,
+                )
+        raw = llm.chat_json(system, json.dumps(payload, sort_keys=True), schema, required_fields=None)
+    except (json.JSONDecodeError, Exception):  # noqa: BLE001
+        pass
+    if raw is None:
+        print(
+            "[signal_stream] Groq still failed after truncation; skipping this signal.",
+            file=sys.stderr,
+        )
+    return raw
+
+
 def _review_signals_in_chunks(
     llm: BrainClient,
     analyst_prompt: str,
@@ -337,18 +418,20 @@ def _review_signals_in_chunks(
     behavior: dict[str, Any],
     review_context: dict[str, dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
-    """Review top signals in small model calls.
+    """Review top signals one-per-Groq-request.
 
-    Plain English: local models struggle with giant prompts. Smaller batches are
-    slower than one huge request, but much more likely to actually produce the
-    model-written summaries we want.
+    Plain English: batch_size=1 sends each article to Groq individually. This is
+    slower but much more reliable — the model can focus on one article at a time
+    instead of juggling a batch. Groq's rate limit (30 req/min) is not a concern
+    with the 60s 429 retry already in BrainClient.
     """
 
-    limit = int(behavior.get("analyst_review_limit", 30))
+    limit = int(behavior.get("analyst_review_limit", 40))
+    batch_size = max(1, int(behavior.get("analyst_review_batch_size", 1)))
     candidates = signals[:limit]
     reviewed: dict[str, dict[str, Any]] = {}
-    for index in range(0, len(candidates), 5):
-        chunk = candidates[index : index + 5]
+    for index in range(0, len(candidates), batch_size):
+        chunk = candidates[index : index + batch_size]
         payload = {
             "task": "review_ranked_signals",
             "signals": [_review_payload(signal, review_context.get(signal.id, {})) for signal in chunk],
@@ -357,11 +440,25 @@ def _review_signals_in_chunks(
                 "summary_mode": behavior.get("summary_mode", "short_expanded"),
                 "entity_extraction": behavior.get("entity_extraction", "hybrid"),
                 "short_summary_owner": "model",
-                "short_summary_instruction": "Write a fresh 2-3 sentence card summary from article_text. Do not repeat the title. Do not copy the opening sentence. Use plain English.",
+                "short_summary_instruction": "Write a fresh 2-3 sentence card summary from article_text. Do not repeat the title. Do not copy the opening sentence. Fold the strategic implication in — no separate why_it_matters field. Use plain English.",
             },
         }
-        raw = llm.chat_json(analyst_prompt, json.dumps(payload, sort_keys=True), ANALYST_REVIEW_SCHEMA)
-        if not raw:
+        user_msg = json.dumps(payload, sort_keys=True)
+        # required_fields is intentionally NOT passed here because the analyst
+        # response wraps fields inside {"signals": [{...}]}, not at the top level.
+        # Validation happens below via result.get("signals").
+        raw = _chat_json_with_truncation_fallback(
+            llm,
+            analyst_prompt,
+            user_msg,
+            ANALYST_REVIEW_SCHEMA,
+            required_fields=None,
+        )
+        if raw is None:
+            print(
+                f"[signal_stream] Groq review failed for signal index {index} (required fields missing or error); skipping.",
+                file=sys.stderr,
+            )
             continue
         for item in raw.get("signals", []):
             if item.get("id"):
@@ -370,6 +467,9 @@ def _review_signals_in_chunks(
 
 
 def _review_payload(signal: Signal, context: dict[str, Any]) -> dict[str, Any]:
+    # Send article_text in full — no [:1800] truncation. The oversized-article
+    # policy in _apply_analyst_mode handles the rare case where a single article
+    # exceeds Groq's context limit.
     return {
         "id": signal.id,
         "title": signal.title,
@@ -380,8 +480,7 @@ def _review_payload(signal: Signal, context: dict[str, Any]) -> dict[str, Any]:
         "matched_priorities": signal.matched_priorities,
         "entities": signal.entities,
         "duplicate_count": signal.duplicate_count,
-        "why_it_matters": signal.why_it_matters,
-        "article_text": str(context.get("article_text", ""))[:1800],
+        "article_text": str(context.get("article_text", "")),
         "source_facts": {
             "title": signal.title,
             "source": signal.source,
@@ -779,6 +878,77 @@ def _icon_key(event_type: str) -> str:
         "market_opportunity": "market",
     }
     return mapping.get(event_type, "signal")
+
+
+# ---------------------------------------------------------------------------
+# Digest renderer (moved here from orchestrator.py to break circular import)
+# ---------------------------------------------------------------------------
+
+def render_digest(config: SignalConfig, signals: list[Signal], events: object) -> str:
+    top_signals = signals[: config.digest_limit]
+    critical = [signal for signal in top_signals if signal.urgency == "critical"]
+
+    lines = [
+        "# Signal Stream Briefing",
+        "",
+        f"Generated: {utc_now_iso()}",
+        f"Organization: {config.organization or config.name}",
+        f"Audience: {config.audience}",
+        "",
+        "## Executive Snapshot",
+        "",
+        f"- Signals reviewed: {len(signals)}",
+        f"- Critical alerts: {len(critical)}",
+        f"- Delivery mode: local Markdown digest",
+        "",
+    ]
+
+    if critical:
+        lines.extend(["## Critical Alerts", ""])
+        for signal in critical:
+            lines.extend(_signal_block(signal))
+
+    lines.extend(["## Ranked Signals", ""])
+    for signal in top_signals:
+        lines.extend(_signal_block(signal))
+
+    lines.extend(["## Agent Trace", ""])
+    for event in events:
+        meta = f" {event.metadata}" if event.metadata else ""
+        lines.append(f"- {event.agent}: {event.message}{meta}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _signal_block(signal: Signal) -> list[str]:
+    source = signal.source
+    if signal.published_at:
+        source = f"{source}, {signal.published_at}"
+    duplicate_note = f" ({signal.duplicate_count} related item{'s' if signal.duplicate_count != 1 else ''})" if signal.duplicate_count else ""
+    lines = [
+        f"### {signal.score}/100 - {signal.title}",
+        "",
+        f"- Urgency: {signal.urgency}",
+        f"- Event type: {signal.event_type}{duplicate_note}",
+        f"- Source: {source}",
+    ]
+    if signal.url:
+        lines.append(f"- Link: {signal.url}")
+    lines.extend(
+        [
+            "",
+            f"Summary: {signal.short_summary or signal.summary}",
+            "",
+            f"Expanded summary: {signal.expanded_summary or signal.short_summary or signal.summary}",
+            "",
+            f"Why it matters: {signal.why_it_matters}",
+            "",
+        ]
+    )
+    if signal.scout_note:
+        lines.extend([f"Scout note: {signal.scout_note}", ""])
+    lines.append("")
+    return lines
 
 
 # ---------------------------------------------------------------------------

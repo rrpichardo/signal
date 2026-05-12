@@ -84,8 +84,10 @@ DEFAULT_BEHAVIOR_SETTINGS: dict[str, Any] = {
     "summary_mode": "short_expanded",
     "visuals_mode": "image_icon",
     "entity_extraction": "hybrid",
-    "analyst_review_limit": 8,
-    "analyst_full_review": False,
+    "analyst_review_limit": 40,
+    "analyst_review_batch_size": 1,
+    "analyst_full_review": True,
+    "executive_summary_limit": 12,
     # Critic-loop defaults: opt-in. Existing runs keep the old three-agent shape.
     "enable_critic": True,
     "max_critic_rounds": 1,
@@ -161,7 +163,17 @@ def load_behavior_settings(path: str | Path | None) -> dict[str, Any]:
             pass
     if "analyst_review_limit" in behavior:
         try:
-            settings["analyst_review_limit"] = max(1, min(100, int(behavior["analyst_review_limit"])))
+            settings["analyst_review_limit"] = max(1, min(200, int(behavior["analyst_review_limit"])))
+        except (TypeError, ValueError):
+            pass
+    if "analyst_review_batch_size" in behavior:
+        try:
+            settings["analyst_review_batch_size"] = max(1, min(20, int(behavior["analyst_review_batch_size"])))
+        except (TypeError, ValueError):
+            pass
+    if "executive_summary_limit" in behavior:
+        try:
+            settings["executive_summary_limit"] = max(1, min(100, int(behavior["executive_summary_limit"])))
         except (TypeError, ValueError):
             pass
     # Critic-loop switches: bool toggle and two bounded integers.
@@ -324,8 +336,10 @@ def _render_brain_toml(
             f'relevance_policy = "{_toml_text(behavior.get("relevance_policy", "soft_keep"))}"',
             f"scout_note_enabled = {_toml_bool(behavior.get('scout_note_enabled', True))}",
             f"model_score_adjustment_limit = {int(behavior.get('model_score_adjustment_limit', 20))}",
-            f"analyst_review_limit = {int(behavior.get('analyst_review_limit', 8))}",
-            f"analyst_full_review = {_toml_bool(behavior.get('analyst_full_review', False))}",
+            f"analyst_review_limit = {int(behavior.get('analyst_review_limit', 40))}",
+            f"analyst_review_batch_size = {int(behavior.get('analyst_review_batch_size', 1))}",
+            f"analyst_full_review = {_toml_bool(behavior.get('analyst_full_review', True))}",
+            f"executive_summary_limit = {int(behavior.get('executive_summary_limit', 12))}",
             f'summary_mode = "{_toml_text(behavior.get("summary_mode", "short_expanded"))}"',
             f'visuals_mode = "{_toml_text(behavior.get("visuals_mode", "image_icon"))}"',
             f'entity_extraction = "{_toml_text(behavior.get("entity_extraction", "hybrid"))}"',
