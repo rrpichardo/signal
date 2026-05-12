@@ -46,10 +46,8 @@ class BrainConfig:
 @dataclass
 class AgentConfig:
     max_iterations: int = 6
-    min_signals: int = 8
     dashboard_port: int = 8765
     worker_timeout_seconds: int = 1800
-    max_article_age_days: int = 14
     brain_file: str = "configs/agent_brain.toml"
     prompt_file: str = "configs/agent_brain.toml"
     scout_mode: str = "code"

@@ -11,7 +11,7 @@ import traceback
 from typing import Any
 
 from .llm import BrainClient
-from .models import AgentDecision, Signal, SignalConfig, ToolCall, stable_id, utc_now_iso
+from .models import AgentDecision, Article, Signal, SignalConfig, ToolCall, stable_id, utc_now_iso
 from .prompt_loader import load_prompt_set
 from .prompts import DECISION_SCHEMA
 from .storage import SignalStorage
@@ -201,6 +201,19 @@ class SignalAgentRuntime:
                     result = self._call_worker(run_id, scout, "collect_sources", {"sources": [asdict(source) for source in self.config.sources]})
                     state["articles"] = _merge_articles(state["articles"], result.get("data", {}).get("articles", []))
                     self.storage.save_agent_event(run_id, "Scout", "observation", "Collected configured sources.", _compact_result(result))
+                    # Surface any per-source cap warnings as their own timeline
+                    # events so the dashboard activity panel can show that a
+                    # feed had more new entries than the 20-per-source cap.
+                    for sr in result.get("data", {}).get("source_results", []) or []:
+                        capped = sr.get("source_capped")
+                        if capped:
+                            self.storage.save_agent_event(
+                                run_id,
+                                "Scout",
+                                "source_capped",
+                                f"{sr.get('source', '?')} returned {capped} new entries; kept latest 20.",
+                                {"source": sr.get("source"), "count": int(capped)},
+                            )
                 elif decision.action == "collect_more_context":
                     # Step 2b: If the Orchestrator is not satisfied, it can ask
                     # Scout for a targeted second look instead of blindly moving on.
@@ -271,23 +284,37 @@ class SignalAgentRuntime:
                     state["finalized"] = True
                     break
 
-                if _ready_to_finalize(state, self.config.agent.min_signals):
-                    self.storage.save_agent_event(run_id, "Orchestrator", "checkpoint", "Enough high-confidence signals exist; finalizing.", {})
-                    state["finalized"] = True
-                    break
-
             signals = [_signal_from_json(item) for item in state.get("analysis", {}).get("signals", [])]
             output_path = self._write_digest(run_id, state)
-            self.storage.save_run([], signals, int(state.get("analysis", {}).get("cluster_count", 0)), output_path, utc_now_iso())
-            for signal in signals[: self.config.digest_limit]:
-                # Memory is how Signal Stream avoids acting like every day is day
-                # one. Future runs can see these saved topics and downgrade repeats.
-                self.storage.save_memory_for_signal(signal)
-            self.storage.finish_agent_run(
-                run_id,
-                "complete" if state["finalized"] else "max_iterations",
-                {"articles": len(state["articles"]), "signals": len(signals), "output_path": output_path},
-            )
+            summary = {
+                "articles": len(state["articles"]),
+                "signals": len(signals),
+                "output_path": output_path,
+            }
+            if state["finalized"]:
+                # Convert the article dicts that bounced through Scout's stdout
+                # back into Article objects so the atomic save can persist them
+                # to the seen-set. Only complete runs advance the cursor — the
+                # whole insert + status='complete' transition happens here.
+                collected = [_article_from_state_dict(item) for item in state["articles"]]
+                self.storage.save_run_atomic(
+                    articles=collected,
+                    signals=signals,
+                    cluster_count=int(state.get("analysis", {}).get("cluster_count", 0)),
+                    output_path=output_path,
+                    started_at=utc_now_iso(),
+                    run_id=run_id,
+                    summary=summary,
+                )
+                for signal in signals[: self.config.digest_limit]:
+                    # Memory is how Signal Stream avoids acting like every day is day
+                    # one. Future runs can see these saved topics and downgrade repeats.
+                    self.storage.save_memory_for_signal(signal)
+            else:
+                # max_iterations was reached without the Orchestrator deciding to
+                # finalize. Mark the run "interrupted" and DO NOT persist articles
+                # or signals — that would corrupt the cursor for the next run.
+                self.storage.finish_agent_run(run_id, "interrupted", summary)
             self.storage.save_agent_event(run_id, "Orchestrator", "finish", "Finished agent run.", {"output_path": output_path})
             _run_completed = True
             return {"run_id": run_id, "output_path": output_path, "articles": len(state["articles"]), "signals": len(signals)}
@@ -436,11 +463,19 @@ def _mock_decision(state: dict[str, Any]) -> AgentDecision:
     return AgentDecision("Enough analysis exists to publish.", "finalize_digest", reason="Ranked signals are available.", params={})
 
 
-def _ready_to_finalize(state: dict[str, Any], min_signals: int) -> bool:
-    signals = state.get("analysis", {}).get("signals", [])
-    if len(signals) >= min_signals:
-        return True
-    return bool(signals) and state["context_rounds"] >= 1
+def _article_from_state_dict(item: dict[str, Any]) -> Article:
+    """Rehydrate an Article from the dict shape that travels over worker stdout."""
+
+    return Article(
+        id=str(item.get("id", "")),
+        source=str(item.get("source", "")),
+        title=str(item.get("title", "")),
+        url=str(item.get("url", "")),
+        published_at=str(item.get("published_at", "")),
+        body=str(item.get("body", "")),
+        fetched_at=str(item.get("fetched_at", "")),
+        raw=dict(item.get("raw") or {}),
+    )
 
 
 def _merge_articles(existing: list[dict[str, Any]], incoming: list[dict[str, Any]]) -> list[dict[str, Any]]:

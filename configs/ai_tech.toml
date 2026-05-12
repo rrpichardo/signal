@@ -21,10 +21,8 @@ timeout_seconds = 60
 
 [agent]
 max_iterations = 6
-min_signals = 8
 dashboard_port = 8765
 worker_timeout_seconds = 2400
-max_article_age_days = 14
 brain_file = "agent_brain.toml"
 # Fallback modes only. The dashboard edits the real defaults in agent_brain.toml.
 scout_mode = "hybrid"
