@@ -26,7 +26,8 @@ export interface Signal {
   expanded_summary: string;
   why_it_matters?: string | null;
   url: string;
-  score_breakdown: ScoreBreakdownItem[];
+  // Omitted by the list endpoint (/api/signals) for performance; present on /api/signals/<id>.
+  score_breakdown?: ScoreBreakdownItem[];
   // Entities is a free-form bag keyed by entity type (e.g. "company", "person").
   entities: Record<string, string[] | string>;
   image_url: string;

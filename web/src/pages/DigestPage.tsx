@@ -1,13 +1,13 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { useDisplaySettings, useLatestRun, useSignals } from "@/lib/queries";
+import { useDisplaySettings, useExecutiveSummary, useLatestRun, useSignals } from "@/lib/queries";
 import { FeaturedSignal } from "@/components/signals/FeaturedSignal";
 import { SignalListItem } from "@/components/signals/SignalListItem";
 import { Pagination } from "@/components/Pagination";
 import { Skeleton } from "@/components/ui/skeleton";
 import { relativeTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import type { AgentRun } from "@/lib/types";
+import type { AgentRun, Signal } from "@/lib/types";
 
 type Scope = "latest" | "all";
 
@@ -38,6 +38,7 @@ export default function DigestPage() {
 
   const { data: response, isLoading, error } = useSignals({ scope, page });
   const { data: run } = useLatestRun();
+  const { data: execSignals } = useExecutiveSummary();
 
   const hasRun = run && "id" in run;
   const latestAgentRun = hasRun ? (run as AgentRun) : null;
@@ -117,6 +118,11 @@ export default function DigestPage() {
         </div>
       )}
 
+      {/* Executive summary — top 12 signals at a glance. Only shown on page 1 of latest scope. */}
+      {scope === "latest" && page === 1 && execSignals && execSignals.length > 0 && (
+        <ExecSummaryBlock signals={execSignals} />
+      )}
+
       {/* Empty state — when the run produced 0 signals, or there are no signals at all. */}
       {total === 0 ? (
         <EmptyState scope={scope} />
@@ -173,6 +179,30 @@ function ScopeToggle({ scope, onChange }: { scope: Scope; onChange: (s: Scope) =
       >
         All time
       </button>
+    </div>
+  );
+}
+
+// Compact numbered list of top-12 signals. Gives readers a scannable headline
+// view before they commit to the full featured card below.
+function ExecSummaryBlock({ signals }: { signals: Signal[] }) {
+  return (
+    <div className="mb-10 rounded-md border border-border bg-muted/30 p-5">
+      <div className="kicker mb-3">Executive summary — top {signals.length}</div>
+      <ol className="space-y-2">
+        {signals.map((s, i) => (
+          <li key={s.id} className="flex items-baseline gap-3 text-ui">
+            <span className="w-5 shrink-0 text-right font-mono text-muted-foreground/60 text-xs">{i + 1}</span>
+            <Link
+              to={`/signals/${encodeURIComponent(s.id)}`}
+              className="flex-1 text-foreground hover:text-accent hover:underline"
+            >
+              {s.title}
+            </Link>
+            <span className="shrink-0 font-mono text-xs text-muted-foreground">{s.score}</span>
+          </li>
+        ))}
+      </ol>
     </div>
   );
 }

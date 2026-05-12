@@ -466,12 +466,54 @@ class SignalStorage:
             rows = conn.execute(query, params).fetchall()
 
         return {
-            "items": [self._hydrate_signal_row(row) for row in rows],
+            # slim=True omits score_breakdown from list response — detail endpoint serves it.
+            "items": [self._hydrate_signal_row(row, slim=True) for row in rows],
             "total": total,
             "page": page,
             "page_size": page_size,
             "total_pages": total_pages,
         }
+
+    def get_signal(self, signal_id: str) -> dict[str, Any] | None:
+        """Return a single signal by ID with the full score_breakdown included."""
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                select id, title, score, urgency, event_type, source, published_at, summary, short_summary,
+                       expanded_summary, why_it_matters, url, score_breakdown_json, entities_json, image_url,
+                       icon_key, scout_note, relevance_label, created_at
+                from signals where id = ?
+                """,
+                (signal_id,),
+            ).fetchone()
+        return self._hydrate_signal_row(row) if row else None
+
+    def list_signals_executive(
+        self,
+        limit: int = 12,
+        run_started_at: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return the top `limit` signals by score from the latest run window.
+
+        Used by the /api/signals/executive endpoint to power the digest exec
+        summary block. Signals are slim (no score_breakdown) — the executive
+        view only needs headline metadata.
+        """
+        query = """
+            select id, title, score, urgency, event_type, source, published_at, summary, short_summary,
+                   expanded_summary, why_it_matters, url, score_breakdown_json, entities_json, image_url,
+                   icon_key, scout_note, relevance_label, created_at
+            from signals
+        """
+        params: list[Any] = []
+        if run_started_at:
+            query += " where created_at >= ?"
+            params.append(run_started_at)
+        query += " order by score desc, created_at desc limit ?"
+        params.append(limit)
+        with self.connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [self._hydrate_signal_row(row, slim=True) for row in rows]
 
     def latest_run(self) -> dict[str, Any] | None:
         # Most recent complete run from agent_runs. Used by the dashboard to scope
@@ -495,13 +537,18 @@ class SignalStorage:
             "output_path": summary.get("output_path", ""),
         }
 
-    def _hydrate_signal_row(self, row: Any) -> dict[str, Any]:
+    def _hydrate_signal_row(self, row: Any, *, slim: bool = False) -> dict[str, Any]:
         # Shared post-processing for signal rows: parse JSON fields and apply UI fallbacks.
+        # slim=True omits score_breakdown — used by the list endpoint to reduce payload size.
         item = dict(row)
-        try:
-            item["score_breakdown"] = json.loads(item.pop("score_breakdown_json") or "[]")
-        except json.JSONDecodeError:
-            item["score_breakdown"] = []
+        if slim:
+            # Drop the (potentially large) breakdown from list responses.
+            item.pop("score_breakdown_json", None)
+        else:
+            try:
+                item["score_breakdown"] = json.loads(item.pop("score_breakdown_json") or "[]")
+            except json.JSONDecodeError:
+                item["score_breakdown"] = []
         try:
             item["entities"] = json.loads(item.pop("entities_json") or "{}")
         except json.JSONDecodeError:

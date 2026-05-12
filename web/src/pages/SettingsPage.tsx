@@ -3,6 +3,7 @@ import { useBrain, useSaveSettings } from "@/lib/queries";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ReaderSettingsForm } from "@/components/settings/ReaderSettingsForm";
 import { AgentSettingsForm } from "@/components/settings/AgentSettingsForm";
+import { ScoringSettingsForm } from "@/components/settings/ScoringSettingsForm";
 import { PromptsForm } from "@/components/settings/PromptsForm";
 import { AdvancedBrainEditor } from "@/components/settings/AdvancedBrainEditor";
 import { SaveBar } from "@/components/settings/SaveBar";
@@ -72,6 +73,7 @@ export default function SettingsPage() {
         <TabsList>
           <TabsTrigger value="reader">Reader</TabsTrigger>
           <TabsTrigger value="agent">Agent</TabsTrigger>
+          <TabsTrigger value="scoring">Scoring</TabsTrigger>
           <TabsTrigger value="prompts">Prompts</TabsTrigger>
           <TabsTrigger value="advanced">Advanced</TabsTrigger>
         </TabsList>
@@ -82,6 +84,11 @@ export default function SettingsPage() {
 
         <TabsContent value="agent">
           <AgentSettingsForm settings={effective} onChange={handleChange} />
+        </TabsContent>
+
+        {/* Scoring tab: component weights + top-N knobs. Sum-of-weights must equal 100. */}
+        <TabsContent value="scoring">
+          <ScoringSettingsForm settings={effective} onChange={handleChange} />
         </TabsContent>
 
         <TabsContent value="prompts">
