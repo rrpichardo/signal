@@ -15,24 +15,22 @@ digest_limit = 12
 critical_threshold = 86
 similarity_threshold = 0.48
 
+[brain]
+model = "meta-llama/llama-4-scout-17b-16e-instruct"
+timeout_seconds = 60
+
 [agent]
 max_iterations = 6
 min_signals = 8
 dashboard_port = 8765
-worker_timeout_seconds = 3600
+worker_timeout_seconds = 2400
 max_article_age_days = 14
 brain_file = "agent_brain.toml"
 # Fallback modes only. The dashboard edits the real defaults in agent_brain.toml.
 scout_mode = "hybrid"
 analyst_mode = "hybrid"
-require_ollama = true
+require_brain = true
 allow_mock_brain = false
-
-[ollama]
-enabled = true
-model = "qwen3:1.7b"
-host = "http://localhost:11434"
-timeout_seconds = 180
 
 [[priorities]]
 name = "AI platform shifts"

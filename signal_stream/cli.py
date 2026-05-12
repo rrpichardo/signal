@@ -6,9 +6,22 @@ from pathlib import Path
 from .agent_runtime import AgentRuntimeError, SignalAgentRuntime
 from .config import load_config
 from .dashboard import serve_dashboard
-from .llm import OllamaClient
+from .llm import BrainClient
 from .orchestrator import SignalStreamOrchestrator
 from .storage import SignalStorage
+
+
+def _explain_brain_error(err: str) -> str:
+    msg = err.lower()
+    if "401" in msg or "unauthorized" in msg:
+        return f"Invalid API key (401). Check GROQ_API_KEY. ({err})"
+    if "429" in msg or "rate limit" in msg:
+        return f"Rate limited (429). Wait a minute and retry. ({err})"
+    if "404" in msg or "model_not_found" in msg:
+        return f"Model not found (404). Check brain.model in config. ({err})"
+    if "timeout" in msg or "timed out" in msg:
+        return f"Network timeout. Check internet connection. ({err})"
+    return err
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -51,7 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
     feedback_parser.add_argument("--label", required=True, choices=["useful", "not_useful", "critical", "irrelevant"])
     feedback_parser.add_argument("--note", default="")
 
-    doctor_parser = subparsers.add_parser("doctor", help="Check config, storage, and optional Ollama connectivity.")
+    doctor_parser = subparsers.add_parser("doctor", help="Check config, storage, and Groq brain connectivity.")
     doctor_parser.add_argument("--config", default=None, help="Path to a Signal Stream TOML config.")
     return parser
 
@@ -71,7 +84,7 @@ def main(argv: list[str] | None = None) -> int:
             result = SignalAgentRuntime(config, config_path=config_path).run(goal=args.goal or None)
         except AgentRuntimeError as exc:
             print(f"Agent run failed: {exc}")
-            print("Tip: start Ollama and pull a small model, for example `ollama pull qwen3:1.7b`.")
+            print("Tip: export GROQ_API_KEY=<your-key> before running.")
             return 1
         print(f"Agent run: {result['run_id']}")
         print(f"Digest: {result['output_path']}")
@@ -119,6 +132,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if command == "doctor":
+        import os as _os
         storage = SignalStorage(config.storage_path)
         storage.init()
         output_dir = Path(config.output_dir)
@@ -127,13 +141,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Storage: {storage.path}")
         print(f"Output dir: {output_dir.resolve()}")
         print(f"Sources enabled: {sum(1 for source in config.sources if source.enabled)}")
-        if config.ollama.enabled:
-            client = OllamaClient(config)
-            print(f"Ollama: {'available' if client.available() else 'unavailable'} ({config.ollama.host}, {config.ollama.model})")
-            if client.last_error:
-                print(f"Ollama error: {client.last_error}")
-        else:
-            print("Ollama: disabled; agent mode needs it unless allow_mock_brain is true.")
+        api_key_set = bool(_os.environ.get("GROQ_API_KEY"))
+        print(f"API key set: {'yes' if api_key_set else 'no'}")
+        client = BrainClient(config)
+        available = client.available()
+        print(f"Brain: Groq (model={config.brain.model}) — {'available' if available else 'unavailable'}")
+        if client.last_error:
+            print(f"Brain error: {_explain_brain_error(client.last_error)}")
         return 0
 
     parser.print_help()

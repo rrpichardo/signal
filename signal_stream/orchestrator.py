@@ -12,7 +12,7 @@ from .agents import (
     NormalizeAgent,
     RelevanceAgent,
 )
-from .llm import OllamaClient
+from .llm import BrainClient
 from .models import RunResult, Signal, SignalConfig, utc_now_iso
 from .storage import SignalStorage
 
@@ -25,7 +25,7 @@ class SignalStreamOrchestrator:
     def run(self, output_path: str | None = None) -> RunResult:
         self.storage.init()
         started_at = utc_now_iso()
-        ctx = AgentContext(config=self.config, storage=self.storage, llm=OllamaClient(self.config))
+        ctx = AgentContext(config=self.config, storage=self.storage, llm=BrainClient(self.config))
 
         FeedbackAgent().run(ctx)
         articles = IngestAgent().run(ctx)

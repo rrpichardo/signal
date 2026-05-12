@@ -6,7 +6,7 @@ import json
 from typing import Any
 
 from .agents import ClusterAgent, EntityAgent, RelevanceAgent
-from .llm import OllamaClient
+from .llm import BrainClient
 from .models import AgentRunLog, Article, ClusterInsight, Signal, SignalConfig, stable_id
 from .orchestrator import render_digest
 from .prompt_loader import DEFAULT_SCORING_RUBRIC
@@ -64,7 +64,7 @@ def analyze_articles(
 
     articles = [_article_from_json(item) for item in articles_json]
     trace = AgentRunLog()
-    ctx = _Context(config=config, storage=storage, llm=OllamaClient(config), trace=trace)
+    ctx = _Context(config=config, storage=storage, llm=BrainClient(config), trace=trace)
 
     normalized = _dedupe_exact(articles, config.agent.max_article_age_days)
     clusters = ClusterAgent().run(ctx, normalized)
@@ -81,7 +81,7 @@ def analyze_articles(
         score, score_breakdown = _base_score_card(article, draft, memory_hits, event_type, scoring_rubric or DEFAULT_SCORING_RUBRIC, behavior)
         # Code-path fallback: hand the LLM raw material, not a heuristic summary.
         # The Analyst prompt specifies exactly how to rewrite this into proper prose.
-        # When Ollama is unavailable the raw excerpt is shown as-is — honest fallback.
+        # When the brain is unavailable the raw excerpt is shown as-is — honest fallback.
         short_summary = first_sentences(article.body, max_sentences=2, max_chars=200)
         expanded_summary = "" if behavior.get("summary_mode") == "short_only" else first_sentences(article.body, max_sentences=4, max_chars=600)
         visuals_mode = str(behavior.get("visuals_mode", "image_icon"))
@@ -138,7 +138,7 @@ def analyze_articles(
 
 
 class _Context:
-    def __init__(self, config: SignalConfig, storage: SignalStorage, llm: OllamaClient, trace: AgentRunLog):
+    def __init__(self, config: SignalConfig, storage: SignalStorage, llm: BrainClient, trace: AgentRunLog):
         self.config = config
         self.storage = storage
         self.llm = llm
@@ -268,7 +268,7 @@ def _apply_analyst_mode(
     if analyst_mode not in {"hybrid", "model"} or not signals:
         return signals
 
-    llm = OllamaClient(config)
+    llm = BrainClient(config)
     if not llm.available():
         return signals
 
@@ -313,7 +313,7 @@ def _apply_analyst_mode(
 
 
 def _review_signals_in_chunks(
-    llm: OllamaClient,
+    llm: BrainClient,
     analyst_prompt: str,
     signals: list[Signal],
     behavior: dict[str, Any],
@@ -382,7 +382,7 @@ def _review_payload(signal: Signal, context: dict[str, Any]) -> dict[str, Any]:
 
 
 def _repair_lazy_summary(
-    llm: OllamaClient,
+    llm: BrainClient,
     analyst_prompt: str,
     signal: Signal,
     context: dict[str, Any],
@@ -553,7 +553,7 @@ def _looks_like_lazy_summary(summary: str, title: str) -> bool:
 def _rough_summary(text: str) -> str:
     """Fallback summary used only when the model cannot review the signal.
 
-    Plain English: in hybrid/model mode, Ollama owns the final short summary.
+    Plain English: in hybrid/model mode, the brain owns the final short summary.
     This rough version keeps the app usable if the local model is unavailable.
     """
 
@@ -650,7 +650,7 @@ def score_digest_quality(
     The code path does structural integrity only: are required fields present?
     All content judgment (low-value phrases, score quality, duplicate detection,
     summary quality) belongs to the LLM Critic via critic_prompt. The code path
-    is a safety net for when Ollama is unavailable — not a rule engine.
+    is a safety net for when the brain is unavailable — not a rule engine.
     """
 
     if not signals:
@@ -685,7 +685,7 @@ def score_digest_quality(
 
     # LLM-based check — only in hybrid or model mode, and only when an LLM is
     # available. The code score is returned immediately if the LLM is skipped or
-    # fails, so the runtime is never blocked by an Ollama outage.
+    # fails, so the runtime is never blocked by a brain outage.
     if critic_mode in {"hybrid", "model"} and llm is not None:
         try:
             if llm.available():

@@ -4,7 +4,7 @@ from pathlib import Path
 import tomllib
 from typing import Any
 
-from .models import AgentConfig, OllamaConfig, Priority, SignalConfig, SourceConfig
+from .models import AgentConfig, BrainConfig, Priority, SignalConfig, SourceConfig
 
 
 def _resolve(base_dir: Path, value: str | None, default: str) -> str:
@@ -32,7 +32,7 @@ def load_config(path: str | Path = "configs/demo.toml") -> SignalConfig:
     profile = raw.get("profile", {})
     storage = raw.get("storage", {})
     delivery = raw.get("delivery", {})
-    ollama = raw.get("ollama", {})
+    brain = raw.get("brain", {})
     agent = raw.get("agent", {})
 
     priorities = [
@@ -74,23 +74,21 @@ def load_config(path: str | Path = "configs/demo.toml") -> SignalConfig:
         digest_limit=int(delivery.get("digest_limit", 10)),
         critical_threshold=int(delivery.get("critical_threshold", 82)),
         similarity_threshold=float(delivery.get("similarity_threshold", 0.52)),
-        ollama=OllamaConfig(
-            enabled=bool(ollama.get("enabled", True)),
-            model=str(ollama.get("model", "qwen3:1.7b")),
-            host=str(ollama.get("host", "http://localhost:11434")).rstrip("/"),
-            timeout_seconds=int(ollama.get("timeout_seconds", 45)),
+        brain=BrainConfig(
+            model=str(brain.get("model", "meta-llama/llama-4-scout-17b-16e-instruct")),
+            timeout_seconds=int(brain.get("timeout_seconds", 60)),
         ),
         agent=AgentConfig(
             max_iterations=int(agent.get("max_iterations", 6)),
             min_signals=int(agent.get("min_signals", 8)),
             dashboard_port=int(agent.get("dashboard_port", 8765)),
-            worker_timeout_seconds=int(agent.get("worker_timeout_seconds", 120)),
+            worker_timeout_seconds=int(agent.get("worker_timeout_seconds", 1800)),
             max_article_age_days=int(agent.get("max_article_age_days", 14)),
             brain_file=_resolve(base_dir, agent.get("brain_file") or agent.get("prompt_file"), "agent_brain.toml"),
             prompt_file=_resolve(base_dir, agent.get("brain_file") or agent.get("prompt_file"), "agent_brain.toml"),
             scout_mode=str(agent.get("scout_mode", "code")).lower(),
             analyst_mode=str(agent.get("analyst_mode", "code")).lower(),
-            require_ollama=bool(agent.get("require_ollama", True)),
+            require_brain=bool(agent.get("require_brain", True)),
             allow_mock_brain=bool(agent.get("allow_mock_brain", False)),
             # Critic-loop fields: read from [agent] block in the TOML config.
             # The brain file's [behavior] block overrides these at runtime via

@@ -87,7 +87,7 @@ class ScoreDigestQualityTest(unittest.TestCase):
                 return True
 
             def chat_json(self, *args: object, **kwargs: object) -> None:
-                raise RuntimeError("Ollama is down")
+                raise RuntimeError("Brain is down")
 
         signals = [self._good_signal()]
         # Should not raise; falls back to code-only score.
@@ -198,16 +198,14 @@ class CriticLoopIntegrationTest(unittest.TestCase):
                     min_signals = 3
                     dashboard_port = 8878
                     worker_timeout_seconds = 30
-                    require_ollama = false
+                    require_brain = false
                     allow_mock_brain = true
                     enable_critic = true
                     max_critic_rounds = 1
                     critic_score_threshold = 70
 
-                    [ollama]
-                    enabled = false
-                    model = "qwen3:1.7b"
-                    host = "http://localhost:11434"
+                    [brain]
+                    model = "meta-llama/llama-4-scout-17b-16e-instruct"
                     timeout_seconds = 10
 
                     [[priorities]]
@@ -289,14 +287,12 @@ class CriticLoopIntegrationTest(unittest.TestCase):
                     min_signals = 3
                     dashboard_port = 8879
                     worker_timeout_seconds = 30
-                    require_ollama = false
+                    require_brain = false
                     allow_mock_brain = true
                     enable_critic = false
 
-                    [ollama]
-                    enabled = false
-                    model = "qwen3:1.7b"
-                    host = "http://localhost:11434"
+                    [brain]
+                    model = "meta-llama/llama-4-scout-17b-16e-instruct"
                     timeout_seconds = 10
 
                     [[priorities]]

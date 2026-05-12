@@ -7,7 +7,7 @@ import xml.etree.ElementTree as ET
 from typing import Any
 from urllib import request
 
-from .llm import OllamaClient
+from .llm import BrainClient
 from .models import (
     AgentRunLog,
     Article,
@@ -50,7 +50,7 @@ EVENT_KEYWORDS = {
 class AgentContext:
     config: SignalConfig
     storage: SignalStorage
-    llm: OllamaClient
+    llm: BrainClient
     trace: AgentRunLog = field(default_factory=AgentRunLog)
     priority_adjustments: dict[str, float] = field(default_factory=dict)
 
@@ -268,9 +268,9 @@ class BriefingAgent:
 
     def run(self, ctx: AgentContext, drafts: list[SignalDraft]) -> list[Signal]:
         signals: list[Signal] = []
-        llm_available = ctx.llm.available() if ctx.config.ollama.enabled else False
-        if ctx.config.ollama.enabled and not llm_available:
-            ctx.trace.add(self.name, "Ollama unavailable, using deterministic summaries.", error=ctx.llm.last_error or "")
+        llm_available = ctx.llm.available()
+        if not llm_available:
+            ctx.trace.add(self.name, "Brain unavailable, using deterministic summaries.", error=ctx.llm.last_error or "")
 
         for draft in drafts:
             article = draft.cluster.articles[0]

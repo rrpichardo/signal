@@ -7,7 +7,7 @@ import unittest
 from signal_stream.analysis_tools import _apply_analyst_mode, _base_score_card, _bounded_model_score, _looks_like_lazy_summary
 from signal_stream.config import load_config
 from signal_stream.dashboard import dashboard_settings, save_dashboard_settings
-from signal_stream.models import Article, OllamaConfig, Priority, Signal, SignalConfig
+from signal_stream.models import Article, BrainConfig, Priority, Signal, SignalConfig
 from signal_stream.prompt_loader import load_behavior_settings, load_brain_file, save_brain_file
 from signal_stream.source_tools import enrich_articles_with_model
 
@@ -109,8 +109,7 @@ output_dir = "{tmp_path}"
 [agent]
 brain_file = "{brain_path}"
 
-[ollama]
-enabled = false
+[brain]
 """.strip(),
                 encoding="utf-8",
             )
@@ -125,7 +124,7 @@ enabled = false
             self.assertEqual(load_behavior_settings(brain_path)["relevance_policy"], "hard_drop")
 
     def test_hybrid_analyst_uses_model_owned_short_summary(self) -> None:
-        class FakeOllama:
+        class FakeBrain:
             def __init__(self, config):  # noqa: ANN001
                 pass
 
@@ -158,7 +157,7 @@ enabled = false
             sources=[],
             storage_path=":memory:",
             output_dir=".",
-            ollama=OllamaConfig(enabled=True),
+            brain=BrainConfig(),
         )
         signal = Signal(
             id="sig_1",
@@ -182,8 +181,8 @@ enabled = false
 
         import signal_stream.analysis_tools as analysis_tools
 
-        original = analysis_tools.OllamaClient
-        analysis_tools.OllamaClient = FakeOllama
+        original = analysis_tools.BrainClient
+        analysis_tools.BrainClient = FakeBrain
         try:
             updated = _apply_analyst_mode(
                 [signal],
@@ -194,14 +193,14 @@ enabled = false
                 {"sig_1": {"article_text": "Full article text for the model."}},
             )[0]
         finally:
-            analysis_tools.OllamaClient = original
+            analysis_tools.BrainClient = original
 
         self.assertEqual(updated.short_summary, "Model-written card paragraph for the reader.")
         self.assertEqual(updated.summary, updated.short_summary)
         self.assertEqual(updated.expanded_summary, "Model-written expanded summary for the detail view.")
 
     def test_lazy_model_summary_gets_repaired_by_second_model_call(self) -> None:
-        class FakeOllama:
+        class FakeBrain:
             def __init__(self, config):  # noqa: ANN001
                 self.calls = 0
 
@@ -239,7 +238,7 @@ enabled = false
             sources=[],
             storage_path=":memory:",
             output_dir=".",
-            ollama=OllamaConfig(enabled=True),
+            brain=BrainConfig(),
         )
         signal = Signal(
             id="sig_1",
@@ -263,8 +262,8 @@ enabled = false
 
         import signal_stream.analysis_tools as analysis_tools
 
-        original = analysis_tools.OllamaClient
-        analysis_tools.OllamaClient = FakeOllama
+        original = analysis_tools.BrainClient
+        analysis_tools.BrainClient = FakeBrain
         try:
             updated = _apply_analyst_mode(
                 [signal],
@@ -275,12 +274,12 @@ enabled = false
                 {"sig_1": {"article_text": "The company launched a new agent evaluation tool for development teams."}},
             )[0]
         finally:
-            analysis_tools.OllamaClient = original
+            analysis_tools.BrainClient = original
 
         self.assertEqual(updated.short_summary, "The launch gives developers a clearer way to evaluate agent workflows before production.")
 
     def test_missing_batch_review_still_repairs_top_candidate_summary(self) -> None:
-        class FakeOllama:
+        class FakeBrain:
             def __init__(self, config):  # noqa: ANN001
                 pass
 
@@ -306,7 +305,7 @@ enabled = false
             sources=[],
             storage_path=":memory:",
             output_dir=".",
-            ollama=OllamaConfig(enabled=True),
+            brain=BrainConfig(),
         )
         signal = Signal(
             id="sig_1",
@@ -330,8 +329,8 @@ enabled = false
 
         import signal_stream.analysis_tools as analysis_tools
 
-        original = analysis_tools.OllamaClient
-        analysis_tools.OllamaClient = FakeOllama
+        original = analysis_tools.BrainClient
+        analysis_tools.BrainClient = FakeBrain
         try:
             updated = _apply_analyst_mode(
                 [signal],
@@ -342,7 +341,7 @@ enabled = false
                 {"sig_1": {"article_text": "Article about simplifying DAX reporting logic."}},
             )[0]
         finally:
-            analysis_tools.OllamaClient = original
+            analysis_tools.BrainClient = original
 
         self.assertEqual(updated.short_summary, "The story gives teams a practical way to simplify reporting logic.")
 
