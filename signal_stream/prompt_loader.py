@@ -257,6 +257,16 @@ def save_brain_file(path: str | Path, brain: dict[str, Any]) -> None:
                     "priority_match_bands", "company_match_bands", "corroboration_bands"):
         _merge_int_section(scoring[section], incoming_scoring.get(section, {}))
 
+    # Validate that the 5 component weights still sum to 100 after merging.
+    # Raise immediately so the dashboard surfaces a clear error rather than
+    # silently writing a broken TOML that produces nonsense scores.
+    component_sum = sum(int(v) for v in scoring["components"].values())
+    if component_sum != 100:
+        raise ValueError(
+            f"Component weights must sum to 100 (got {component_sum}). "
+            f"Adjust priority_match, company_match, recency, event_strength, or corroboration."
+        )
+
     behavior = dict(existing.get("behavior") or DEFAULT_BEHAVIOR_SETTINGS)
     behavior.update(dict(brain.get("behavior") or {}))
 

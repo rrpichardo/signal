@@ -126,7 +126,7 @@ def analyze_articles(
         expanded_summary = "" if behavior.get("summary_mode") == "short_only" else first_sentences(article.body, max_sentences=4, max_chars=600)
         visuals_mode = str(behavior.get("visuals_mode", "image_icon"))
         image_url = str(article.raw.get("image_url", "")) if visuals_mode == "image_icon" else ""
-        icon_key = _icon_key(draft.event_type) if visuals_mode != "none" else ""
+        icon_key = _icon_key(draft.event_type, draft.entities, draft.text) if visuals_mode != "none" else ""
         signal = Signal(
             id=stable_id(draft.cluster.id, article.title, score, prefix="sig"),
             cluster_id=draft.cluster.id,
@@ -866,7 +866,38 @@ def _merge_entities(existing: dict[str, list[str]], model_entities: Any, behavio
     return merged
 
 
-def _icon_key(event_type: str) -> str:
+def _icon_key(event_type: str, entities: dict | None = None, topic: str = "") -> str:
+    # Company-specific icons take priority — a story about NVIDIA chips is more
+    # usefully represented by a chip icon than by the generic event-type icon.
+    _COMPANY_ICONS: dict[str, str] = {
+        "nvidia": "chip",
+        "amd": "chip",
+        "intel": "chip",
+        "anthropic": "claude",
+        "openai": "openai",
+        "google": "google",
+        "deepmind": "google",
+        "meta": "meta",
+        "microsoft": "microsoft",
+        "apple": "apple",
+        "amazon": "amazon",
+        "xai": "xai",
+        "mistral": "mistral",
+        "perplexity": "perplexity",
+    }
+    if entities:
+        for comp in entities.get("competitors", []):
+            icon = _COMPANY_ICONS.get(comp.lower())
+            if icon:
+                return icon
+    # Topic fallback: "chip"/"gpu" in topic text → chip icon
+    if topic:
+        topic_lower = topic.lower()
+        if any(kw in topic_lower for kw in ("gpu", "chip", "accelerator", "tpu")):
+            return "chip"
+        if any(kw in topic_lower for kw in ("regulation", "policy", "copyright", "safety")):
+            return "risk"
+    # Event-type default
     mapping = {
         "platform_shift": "platform",
         "competitor_move": "competitor",

@@ -104,7 +104,7 @@ export default function SignalDetailPage() {
 
       {/* Score breakdown — collapsed by default so it doesn't distract. */}
       <div className="mb-8">
-        <ScoreBreakdownPanel score={signal.score} breakdown={signal.score_breakdown} />
+        <ScoreBreakdownPanel score={signal.score} breakdown={signal.score_breakdown ?? []} />
       </div>
 
       {/* Entities panel. */}

@@ -35,6 +35,8 @@ class SourceConfig:
     on_demand: bool = False
     limit: int = 25
     enabled: bool = True
+    # Used by html_scrape kind: regex substring that article hrefs must contain.
+    article_link_pattern: str | None = None
 
 
 @dataclass

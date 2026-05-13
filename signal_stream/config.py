@@ -56,6 +56,7 @@ def load_config(path: str | Path = "configs/demo.toml") -> SignalConfig:
             on_demand=bool(item.get("on_demand", False)),
             limit=int(item.get("limit", 25)),
             enabled=bool(item.get("enabled", True)),
+            article_link_pattern=item.get("article_link_pattern") or None,
         )
         for item in raw.get("sources", [])
     ]

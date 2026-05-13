@@ -269,11 +269,33 @@ def _handler(storage: SignalStorage, config: SignalConfig, config_path: str = "c
                 run = storage.latest_agent_run() or {}
                 self._json(storage.tool_calls(run.get("id"), limit=250) if run else [])
                 return
+            if path == "/api/signals/executive":
+                # Top N signals by score from the latest complete run.
+                # Drives the executive summary block at the top of the digest page.
+                run = storage.latest_run()
+                run_started_at = run["started_at"] if run else None
+                behavior = load_brain_file(config.agent.brain_file).get("behavior") or {}
+                exec_limit = int(behavior.get("executive_summary_limit", 12))
+                self._json(storage.list_signals_executive(limit=exec_limit, run_started_at=run_started_at))
+                return
+            if path.startswith("/api/signals/") and len(path) > len("/api/signals/"):
+                # Detail endpoint — returns one signal with full score_breakdown.
+                signal_id = path[len("/api/signals/"):]
+                signal = storage.get_signal(signal_id)
+                if signal is None:
+                    self.send_response(404)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"error": "signal not found"}).encode("utf-8"))
+                    return
+                self._json(signal)
+                return
             if path == "/api/signals":
                 # Parse query string for paged + scoped digest list:
                 #   scope=latest -> only signals from the most recent run
                 #   scope=all    -> every signal across all runs
                 #   page, page_size -> pagination knobs (page_size respects display settings if absent)
+                # Note: list items omit score_breakdown (slim mode). Use /api/signals/<id> for the full detail.
                 qs = parse_qs(urlparse(self.path).query)
                 scope = (qs.get("scope", ["latest"])[0] or "latest").lower()
                 if scope not in ("latest", "all"):

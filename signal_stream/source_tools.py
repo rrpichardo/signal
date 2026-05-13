@@ -63,6 +63,8 @@ def fetch_source(source: SourceConfig, published_after: datetime | None = None) 
             articles = _load_feed_source(source)
         elif source.kind == "youtube":
             articles = _load_youtube_source(source)
+        elif source.kind == "html_scrape":
+            articles = _load_html_scrape_source(source)
         elif source.kind == "report":
             return {
                 "source": source.name,
@@ -339,6 +341,89 @@ def enrich_articles_with_model(
             continue
         merged.append(item)
     return merged
+
+
+def _title_from_url(url: str) -> str:
+    """Derive a readable title from a URL path slug when no better title is available."""
+    slug = url.rstrip("/").split("/")[-1]
+    return normalize_space(slug.replace("-", " ").replace("_", " "))[:120] or url
+
+
+def _load_html_scrape_source(source: SourceConfig) -> list[Article]:
+    """Fetch an archive/index page and return articles found via linked pages.
+
+    Strategy: fetch the archive URL, find all hrefs that contain the
+    article_link_pattern (defaults to '/p/' for Substack-style archives), then
+    call fetch_full_article_page() for each unique link up to source.limit.
+    Titles are extracted from the raw HTML <title> tag or derived from the URL
+    slug as a fallback (the Analyst's body text carries the real content anyway).
+    """
+    if not source.url:
+        return []
+
+    pattern = source.article_link_pattern or "/p/"
+    # Escape the pattern for use in regex, then match it anywhere in an href.
+    link_re = re.compile(
+        r'href=["\']([^"\']*' + re.escape(pattern) + r'[^"\']*)["\']',
+        re.IGNORECASE,
+    )
+    title_re = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+
+    # Archive page fetch errors propagate to fetch_source() so it can report
+    # status='error'. Per-article failures further down are still silently skipped.
+    req = request.Request(source.url, headers={"User-Agent": USER_AGENT})
+    with request.urlopen(req, timeout=25) as resp:
+        raw_html = resp.read(2_000_000).decode("utf-8", errors="replace")
+
+    parsed_base = urllib.parse.urlparse(source.url)
+    base_origin = f"{parsed_base.scheme}://{parsed_base.netloc}"
+
+    seen_urls: set[str] = set()
+    article_urls: list[str] = []
+    for m in link_re.finditer(raw_html):
+        href = m.group(1).split("#")[0].strip()  # strip anchors
+        if not href:
+            continue
+        if href.startswith("//"):
+            href = f"{parsed_base.scheme}:{href}"
+        elif href.startswith("/"):
+            href = f"{base_origin}{href}"
+        elif not href.startswith(("http://", "https://")):
+            href = f"{source.url.rstrip('/')}/{href}"
+        if href not in seen_urls:
+            seen_urls.add(href)
+            article_urls.append(href)
+        if len(article_urls) >= source.limit:
+            break
+
+    articles = []
+    for url in article_urls[:source.limit]:
+        body_text, og_image = fetch_full_article_page(url, timeout=10)
+        # Derive title from the raw <title> tag via a fresh fetch only when the
+        # body was successfully extracted — skip expensive re-fetch on failures.
+        # For articles where body is too short we still record the URL for dedup.
+        article_html_title = ""
+        try:
+            req2 = request.Request(url, headers={"User-Agent": USER_AGENT})
+            with request.urlopen(req2, timeout=10) as resp2:
+                head_html = resp2.read(16_000).decode("utf-8", errors="replace")
+            m2 = title_re.search(head_html)
+            if m2:
+                article_html_title = normalize_space(m2.group(1))
+        except Exception:  # noqa: BLE001 - title is optional; body text is primary
+            pass
+        title = article_html_title or _title_from_url(url)
+        raw: dict[str, Any] = {"image_url": og_image or "", "source_kind": "html_scrape"}
+        articles.append(
+            Article.from_fields(
+                source=source.name,
+                title=title,
+                url=url,
+                body=body_text,
+                raw=raw,
+            )
+        )
+    return articles
 
 
 def _load_json_source(source: SourceConfig) -> list[Article]:

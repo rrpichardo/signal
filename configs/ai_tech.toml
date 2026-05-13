@@ -181,10 +181,11 @@ enabled = true
 
 [[sources]]
 name = "Turing Post"
-kind = "rss"
-group = "substack"
-url = "https://www.turingpost.com/feed"
-limit = 8
+kind = "html_scrape"
+group = "newsletter_blog"
+url = "https://www.turingpost.com/archive"
+article_link_pattern = "/p/"
+limit = 20
 enabled = true
 
 [[sources]]

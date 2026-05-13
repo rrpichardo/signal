@@ -8,6 +8,7 @@ import type {
   BrainSettings,
   DisplaySettings,
   MemoryItem,
+  Signal,
   SignalsResponse,
   ToolCall,
 } from "./types";
@@ -47,6 +48,10 @@ export const api = {
     const query = qs.toString();
     return http<SignalsResponse>(`/api/signals${query ? `?${query}` : ""}`);
   },
+  // Top-N signals by score from the latest run (exec summary, no score_breakdown).
+  executiveSummary: () => http<Signal[]>("/api/signals/executive"),
+  // Single signal detail with full score_breakdown included.
+  signalById: (id: string) => http<Signal>(`/api/signals/${encodeURIComponent(id)}`),
   memory: () => http<MemoryItem[]>("/api/memory"),
   settings: () => http<BrainSettings>("/api/settings"),
   brain: () => http<{ raw: string }>("/api/brain"),

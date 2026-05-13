@@ -26,15 +26,23 @@ export function useSignals(params?: { scope?: "latest" | "all"; page?: number })
   });
 }
 
-// Detail lookup: fetch a wide window (all-time, page 1, large page size) and
-// filter client-side. Avoids a per-id backend endpoint while still resolving
-// links to older signals that wouldn't appear on the latest-run page.
+// Detail lookup: prefer the dedicated /api/signals/<id> endpoint which includes
+// score_breakdown. Falls back gracefully when the signal is not found.
 export function useSignal(id: string | undefined) {
-  const query = useQuery({
-    queryKey: ["signals", "detail-lookup"],
-    queryFn: () => api.signals({ scope: "all", page: 1, page_size: 100 }),
+  return useQuery({
+    queryKey: ["signals", "detail", id],
+    queryFn: () => (id ? api.signalById(id) : Promise.resolve(undefined)),
+    enabled: Boolean(id),
   });
-  return { ...query, data: query.data?.items.find((s) => s.id === id) };
+}
+
+// Top-N signals by score from the latest run — feeds the exec summary header.
+export function useExecutiveSummary() {
+  return useQuery({
+    queryKey: ["signals/executive"],
+    queryFn: api.executiveSummary,
+    refetchInterval: LIVE_INTERVAL,
+  });
 }
 
 // Display preferences (page_size, default_scope) editable in Settings.
