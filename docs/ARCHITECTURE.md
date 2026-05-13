@@ -1,166 +1,207 @@
 # Signal Stream Architecture
 
-Signal Stream is designed as a local-first agent runtime. The Orchestrator is the only component with decision rights; Scout and Analyst are independent worker processes with bounded tools and isolated contexts.
+Signal Stream is a local runtime with a hosted model brain. The Orchestrator is the only component with decision rights; Scout, Analyst, and Critic are worker processes with bounded tools and isolated contexts.
 
 ```mermaid
 flowchart LR
-    A["Local Dashboard"] --> B["Orchestrator Agent"]
-    B --> C["Scout process"]
-    B --> D["Analyst process"]
-    B --> J["Critic process (opt-in)"]
-    C --> E["RSS, blogs, YouTube transcripts"]
-    D --> F["Dedupe, score, memory checks"]
-    F --> B
-    J --> K["Quality score + revision notes"]
-    K --> B
-    B --> G["Final digest"]
-    B --> H["SQLite events/tool calls/memory"]
-    I["Ollama local model"] --> B
+    UI["Dashboard / CLI"] --> ORCH["Orchestrator<br/>agent_runtime.py"]
+    GROQ["Groq Llama 4 Scout<br/>BrainClient"] --> ORCH
+    ORCH --> SCOUT["Scout worker"]
+    ORCH --> ANALYST["Analyst worker"]
+    ORCH --> CRITIC["Critic worker<br/>optional"]
+    SCOUT --> SOURCES["RSS / Atom / YouTube<br/>html_scrape / sample / report"]
+    SCOUT --> CURSOR["Cursor filter<br/>last complete run - 6h"]
+    CURSOR --> ARTICLES["Normalized articles"]
+    ARTICLES --> ANALYST
+    ANALYST --> SEEN["Seen filter<br/>articles table"]
+    SEEN --> CLUSTER["Cluster + entity extraction"]
+    CLUSTER --> SCORE["5-component Python score"]
+    SCORE --> PAGES["Full-page fetch<br/>top 40"]
+    PAGES --> REVIEW["Groq review<br/>1 article/request"]
+    REVIEW --> SIGNALS["Ranked digest<br/>up to 40 signals"]
+    SIGNALS --> CRITIC
+    CRITIC --> ORCH
+    SIGNALS --> SAVE["save_run_atomic"]
+    SAVE --> DB["SQLite<br/>runs, articles, signals,<br/>agent_runs, events, tool_calls, memory"]
+    DB --> UI
 ```
+
+## Current Status
+
+- Hosted API support is **DONE** through Groq and `BrainClient`.
+- The active model is `meta-llama/llama-4-scout-17b-16e-instruct`.
+- The backend remains stdlib-only.
+- The active product path is `python3 -m signal_stream agent run --config configs/ai_tech.toml`.
+- The React dashboard is the primary UI, with the Python inline dashboard as fallback.
 
 ## Why This Fits Signal Stream
 
-- The Orchestrator chooses actions based on observations, which makes the system agentic rather than a fixed automation.
-- Scout and Analyst are separate processes, so they are real subagents for the local MVP.
-- The Critic closes the loop: instead of shipping immediately after the Analyst, the Orchestrator can request a review pass and revise before finalizing. This is the reflection step that separates an agentic system from a pipeline.
-- Memory is SQLite, so the system can avoid repeating prior coverage.
-- The dashboard exposes the agent trace, which makes behavior inspectable during demos.
+- The Orchestrator chooses actions from observations, so the system is agentic instead of a fixed automation.
+- Scout, Analyst, and Critic are separate worker processes, which keeps responsibilities clear.
+- The cursor and seen-set let the system process current material without repeating prior complete runs.
+- The scoring rubric is deterministic and inspectable before Groq applies judgment.
+- The dashboard exposes decisions, source health, stages, tool calls, signal details, scoring breakdowns, memory, and settings.
 
-## Critic / Reflection Loop
+## The Four Roles In Practice
 
-When `enable_critic = true` (in `configs/agent_brain.toml`), the Orchestrator gains a new action: `critique_digest`. After the Analyst produces ranked signals, the Orchestrator picks `critique_digest` and the Critic worker scores the digest 0–100. If the score is below `critic_score_threshold` and revision rounds remain, the Critic's revision notes are added to the Orchestrator's next decision context, prompting it to `analyze_articles` again or `collect_more_context`. The loop exits when the score is at or above the threshold, or `max_critic_rounds` is exhausted.
+Each role has its own prompt in [`../configs/agent_brain.toml`](../configs/agent_brain.toml) and its own narrow toolbox. Tools are plain Python functions, not model-native tool calls.
 
-## Upgrade Path
-
-- Add email and Slack delivery once local dashboard runs are trusted.
-- Add hosted API support behind the same Ollama client interface.
-- Add embeddings for better clustering and memory matching.
-- Add a scheduler or hosted runtime after on-demand agent behavior is stable.
-
----
-
-## The four roles in practice
-
-Signal Stream is a multi-agent loop running inside a single Python process.
-There are four roles. Each role has its own prompt (in
-[`../configs/agent_brain.toml`](../configs/agent_brain.toml)) and its own narrow
-toolbox. **Tools are plain Python functions, not LLM tool-calls** — the
-orchestrator picks an action verb and the worker routes that verb to the
-matching helper.
-
-| Role | File | Prompt block | Tools |
+| Role | File | Prompt block | Responsibility |
 |---|---|---|---|
-| **Orchestrator** (the brain) | `signal_stream/agent_runtime.py` `SignalAgentRuntime.run()` | `[orchestrator]` | None — chooses actions, reads state |
-| **Scout** | `signal_stream/worker.py` + `source_tools.py` | `[scout]` | `fetch_source`, `fetch_context`, `enrich_articles_with_model` |
-| **Analyst** | `signal_stream/worker.py` + `analysis_tools.py` | `[analyst]` | `analyze_articles` (clusters, dedupes, scores, summarizes) |
-| **Critic** (opt-in) | `signal_stream/worker.py` + `analysis_tools.py` | `[critic]` | `score_digest_quality` |
+| **Orchestrator** | `signal_stream/agent_runtime.py` | `[orchestrator]` | Chooses actions, reads state, manages worker calls, finalizes runs |
+| **Scout** | `signal_stream/worker.py`, `signal_stream/source_tools.py` | `[scout]` | Fetches sources, applies cursor, normalizes articles, extracts source images |
+| **Analyst** | `signal_stream/worker.py`, `signal_stream/analysis_tools.py` | `[analyst]` | Seen filtering, clustering, scoring, page fetching, Groq review, summaries |
+| **Critic** | `signal_stream/worker.py`, `signal_stream/analysis_tools.py` | `[critic]` | Optional digest quality review and revision requests |
 
-**Tools are not shared.** Scout owns ingestion. Analyst owns analysis. Critic
-owns quality scoring. There is no shared toolbox.
+Tools are not shared. Scout owns ingestion. Analyst owns analysis. Critic owns quality review.
 
-## How the brain calls the agents
+## How The Brain Calls The Agents
 
-The orchestrator never calls a tool directly. It only picks an action verb,
-and `_call_worker(client, action, params)` (in `agent_runtime.py`) sends that
-verb to the matching worker subprocess. The worker has a small dispatcher
-that maps the verb to the correct Python helper (e.g. `analyze_articles` →
-`analysis_tools.analyze_articles(...)`).
+The Orchestrator never fetches or analyzes directly. It picks an action verb, then `_call_worker(client, action, params)` sends that verb to the correct worker subprocess. The worker dispatcher maps the verb to the Python helper, such as `fetch_source()` or `analyze_articles()`.
 
-This is what keeps the system agentic rather than scripted: the orchestrator
-sees what state has accumulated and decides whether to fetch more, analyze,
-critique, or finalize. The action set is fixed (`collect_sources`,
-`analyze_articles`, `collect_more_context`, `critique_digest`, `finalize_digest`),
-but the order is not.
+The fixed action set is:
 
-## End-to-end run trace
+- `collect_sources`
+- `analyze_articles`
+- `collect_more_context`
+- `critique_digest`
+- `finalize_digest`
 
+The order is not fixed. The Orchestrator decides based on accumulated state, source results, Analyst output, and Critic notes.
+
+## Run Lifecycle
+
+```text
+[CLI or dashboard Run button]
+            |
+            v
+SignalAgentRuntime.run()
+            |
+            v
+start agent_runs row with status="running"
+            |
+            v
+Orchestrator decision loop
+            |
+            +--> collect_sources
+            |       Scout reads latest complete run cursor
+            |       cursor = started_at - 6 hours
+            |       first run: no cursor, use source limits
+            |       fetch RSS / Atom / YouTube / html_scrape / sample / report
+            |       cap cursor matches to 20 per source
+            |       emit source_capped events when needed
+            |
+            +--> analyze_articles
+            |       Analyst drops already-seen articles
+            |       dedupe exact within-run repeats
+            |       cluster related coverage
+            |       extract entities and matched priorities
+            |       score with _base_score_card()
+            |       sort by Python score
+            |       fetch full pages for top 40
+            |       send top 40 to Groq one article per request
+            |       merge score adjustments within configured limit
+            |
+            +--> critique_digest (optional)
+            |       Critic scores the proposed digest
+            |       revision notes can send the loop back to analysis
+            |
+            +--> finalize_digest
+                    write Markdown digest
+                    save articles + signals + complete status atomically
+                    use top 12 signals for executive summary + memory
 ```
-[CLI / dashboard "Run" button]
-            │
-            ▼
-SignalAgentRuntime.run()  ← brain loop starts
-            │
-   ┌────────┴── iteration 1 ──┐
-   │ _decide(): "collect_sources"  │
-   │ → Scout.fetch_source × N feeds│
-   │ → state["articles"] populated │
-   └───────────────────────────────┘
-            │
-   ┌────────┴── iteration 2 ──────────────┐
-   │ _decide(): "analyze_articles"        │
-   │ → Analyst.analyze_articles           │
-   │   • dedupe (ClusterAgent)            │
-   │   • entity extraction                │
-   │   • RelevanceAgent score             │
-   │   • LLM adjustment (hybrid mode)     │
-   │   • write short_summary,             │
-   │     expanded_summary, why_it_matters │
-   │ → state["analysis"]["signals"]       │
-   └──────────────────────────────────────┘
-            │
-   ┌────────┴── iteration 3 (if Critic) ─┐
-   │ _decide(): "critique_digest"        │
-   │ → Critic.score_digest_quality       │
-   │ if score < threshold && rounds left:│
-   │   loop back to analyze_articles     │
-   │   with revision notes               │
-   └─────────────────────────────────────┘
-            │
-            ▼
-Finalize: write Markdown digest, save run +
-signals + memory items to SQLite. Dashboard
-reads SQLite via /api/signals.
-```
 
-## Persistence — where everything is logged
+Activity stages surfaced to the dashboard include `collecting`, `filtering`, `clustering`, `scoring`, `fetching_full_articles`, `groq_reviewing`, `writing_digest`, `complete`, and `failed`.
 
-All state lives in `signal_stream.db` (SQLite) via
-[`../signal_stream/storage.py`](../signal_stream/storage.py).
+## Persistence Model
+
+All state lives in SQLite through [`../signal_stream/storage.py`](../signal_stream/storage.py).
 
 | Table | What's in it |
 |---|---|
-| `runs` | One row per completed agent run: `started_at`, `completed_at`, `article_count`, `signal_count`, `output_path` |
-| `agent_runs` | Modern run tracker with `status` (running/completed/failed) — what the dashboard polls for live state |
-| `signals` | Every analyzed signal: title, score, urgency, event_type, summaries, why_it_matters, entities |
-| `articles` | Raw normalized articles fetched by Scout (deduplicated by hash) |
-| `agent_events` | One row per orchestrator decision and per worker event (joined to `agent_runs` via `run_id`) |
-| `tool_calls` | One row per worker call with input/output JSON, status, confidence |
-| `memory_items` | Topic memory used for repeat-detection across runs |
-| `feedback` | User labels (critical/useful/not_useful/irrelevant) — fed back into scoring on next run |
+| `runs` | Legacy completed-run summary: timestamps, article count, cluster count, signal count, output path |
+| `agent_runs` | Modern run tracker: `id`, `goal`, `status`, `started_at`, `completed_at`, `summary_json` |
+| `articles` | Normalized fetched articles persisted only after a complete agent run |
+| `signals` | Ranked digest signals with summaries, score, urgency, event type, score breakdown, entities, image URL, icon key, and legacy compatibility fields |
+| `agent_events` | Orchestrator and worker events for the activity timeline |
+| `tool_calls` | Worker calls with input/output JSON, status, confidence, and errors |
+| `memory_items` | Top executive-summary signals saved for repeat detection |
+| `feedback` | User labels that feed future priority adjustments |
 
-**On the dashboard:**
+Status conventions:
 
-- `/` — Digest of latest signals (paged, scope-toggle between latest run and all-time)
-- `/activity` — Agent timeline (events) + tool call table for the latest run
-- `/memory` — Memory items used to suppress repeats
-- `/signal/:id` — Detail view of one signal
-- `/settings` — Edit the brain TOML (prompts, scoring, behavior, display)
+- `"running"`: run has started and is still active
+- `"complete"`: run finalized and `save_run_atomic()` persisted articles and signals
+- `"failed"`: exception, worker failure, dashboard stale-run sweep, or interrupted process cleanup
+- `"interrupted"`: max iterations exhausted before finalization
 
-## Where things are *not* logged (yet)
+Only `"complete"` advances the cursor. This is the key persistence guarantee.
 
-Raw articles that Scout fetches but that never become a signal (filtered out,
-deduplicated against memory, scored too low to publish) are stored in the
-`articles` table but are **not surfaced as "rejected" anywhere on the dashboard**.
-They are inputs to the Analyst, not outputs.
+## Atomic Save
 
-If you want to see "things not considered signals," that's a future feature —
-it would need a `rejected_articles` log written by the Analyst with reasons.
+`save_run_atomic()` is the agentic path for successful runs. It inserts articles, inserts signals, creates the legacy `runs` row, and flips `agent_runs.status` to `"complete"` inside one SQLite transaction.
 
-## Changing agent behavior without code
+If any write fails, SQLite rolls the transaction back. That means articles are not marked seen, signals are not partially saved, and the cursor does not move.
 
-Almost everything an operator wants to change lives in
-[`../configs/agent_brain.toml`](../configs/agent_brain.toml), editable from the
-dashboard's Settings page.
+## Cursor And Seen Filtering
+
+The run cursor is:
+
+```text
+latest complete agent run started_at - 6 hours
+```
+
+On the first run, there is no cursor, so each source uses its configured limit. On later runs, Scout filters feed entries to those newer than the cursor and keeps at most 20 new entries per source. Analyst then checks `storage.is_article_seen(article.id, article.url)` before scoring.
+
+The overlap catches late feed publication and clock-skew edge cases; the seen filter removes duplicates created by that overlap.
+
+## Scoring And Groq Review
+
+The Python score source is `_base_score_card()` in `analysis_tools.py`.
+
+Component caps:
+
+- priority match: 25
+- company match: 25
+- recency: 15
+- event strength: 25
+- corroboration: 10
+
+After scoring and sorting, Analyst fetches full article pages for the top `analyst_review_limit` candidates, currently 40. Then it asks Groq to review them with `analyst_review_batch_size = 1`.
+
+Groq receives the article text, Python score, score breakdown, event type, matched priorities, entities, and source notes. It writes the final summaries and can adjust the score by up to `model_score_adjustment_limit`, currently 20.
+
+## Dashboard Routes
+
+- `/` — Digest of latest signals with cards, images/icons, and executive summary
+- `/activity` — Agent timeline, stages, progress, and tool calls
+- `/memory` — Memory items used for repeat detection
+- `/signal/:id` — Detail view with expanded summary, score breakdown, entities, and related signals
+- `/settings` — Edit prompts, scoring bands, priority groups, top-N settings, source limits, and display settings
+
+The signal list endpoint intentionally omits `score_breakdown` for slimmer payloads. The detail endpoint includes the full breakdown.
+
+## Changing Agent Behavior Without Code
+
+Almost everything an operator should tune lives in [`../configs/agent_brain.toml`](../configs/agent_brain.toml), editable from the dashboard Settings page.
 
 | What to change | Where |
 |---|---|
 | Agent prompts | `[orchestrator]`, `[scout]`, `[analyst]`, `[critic]` |
-| Whether the Critic runs | `[behavior].enable_critic` |
-| How strict the Critic is | `[behavior].critic_score_threshold`, `max_critic_rounds` |
-| Whether the LLM is used for analysis | `[behavior].analyst_mode` (hybrid / code / model) |
-| Scoring weights | `[scoring.freshness]`, `[scoring.max_points]`, `[scoring.event_strength]` |
-| Low-value phrase blocklist | `[scoring].low_value_phrases` |
-| Dashboard page size, default scope | `[display].page_size`, `[display].default_scope` |
+| Critic behavior | `[behavior].enable_critic`, `critic_score_threshold`, `max_critic_rounds` |
+| Model usage mode | `[behavior].scout_mode`, `[behavior].analyst_mode` |
+| Top-N model review | `[behavior].analyst_review_limit`, `analyst_review_batch_size`, `analyst_full_review` |
+| Executive summary size | `[behavior].executive_summary_limit` |
+| Score component weights | `[scoring.components]` |
+| Score bands | `[scoring.recency_bands]`, `[scoring.event_strength_bands]`, `[scoring.priority_match_bands]`, `[scoring.company_match_bands]`, `[scoring.corroboration_bands]` |
+| Dashboard display | `[display].page_size`, `[display].default_scope` |
 
-Source-list configuration (which feeds Scout fetches, priorities for scoring)
-lives in `configs/ai_tech.toml` — that's a separate file from the brain.
+Source-list configuration and priority groups live in `configs/ai_tech.toml`.
+
+## Upgrade Path
+
+- Add a scheduler or hosted runtime after on-demand behavior is stable.
+- Add email and Slack delivery once dashboard runs are trusted.
+- Add a rejected-articles view for fetched material that did not become signals.
+- Improve full-page extraction if stdlib parsing proves too noisy for specific sources.

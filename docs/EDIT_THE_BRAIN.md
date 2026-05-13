@@ -1,10 +1,10 @@
 # Edit Signal Stream Without Touching Code
 
-If you want to change how Signal Stream behaves, start here:
+If you want to change how Signal Stream behaves, start with the live brain file:
 
 - [configs/agent_brain.toml](/Users/ricopichardo/Claude/signal/configs/agent_brain.toml)
 
-This file is loaded automatically on the next run.
+This file is loaded on the next run.
 
 You can also edit the same settings from the dashboard:
 
@@ -14,68 +14,131 @@ python3 -m signal_stream dashboard --config configs/ai_tech.toml
 
 Then open `http://127.0.0.1:8765` and click **Settings**.
 
-## What you can safely change
+## What `agent_brain.toml` Controls
 
-### 1. Agent prompts
+### Agent Prompts
 
-These sections control how each agent thinks:
+These sections control the role instructions:
 
 - `[orchestrator]`
 - `[scout]`
 - `[analyst]`
-- `[critic]` — the reflection agent that reviews the digest before it ships (opt-in)
+- `[critic]`
 
 Each one has a `prompt = """ ... """` block.
 
-You can rewrite those instructions in plain English.
+Plain-English edits are fine. Keep prompts specific, keep JSON-output requirements explicit, and avoid adding facts the system cannot verify from the article text.
 
-### 2. Critic / reflection loop
+### Behavior Switches
 
-The Critic is off by default. To turn it on:
+The `[behavior]` section controls product behavior:
+
+```toml
+[behavior]
+scout_mode = "hybrid"
+analyst_mode = "hybrid"
+model_score_adjustment_limit = 20
+analyst_review_limit = 40
+analyst_review_batch_size = 1
+analyst_full_review = true
+executive_summary_limit = 12
+summary_mode = "short_expanded"
+visuals_mode = "image_icon"
+entity_extraction = "hybrid"
+enable_critic = true
+max_critic_rounds = 1
+critic_score_threshold = 70
+```
+
+Common edits:
+
+- Raise or lower `analyst_review_limit` to change how many top candidates Groq reviews.
+- Keep `analyst_review_batch_size = 1` if you want one article per Groq request.
+- Raise or lower `executive_summary_limit` to change how many top signals feed memory and the executive-summary view.
+- Lower `model_score_adjustment_limit` if you want Groq to stay closer to the Python score.
+- Set `enable_critic = false` to skip the reflection pass.
+
+Mode meanings:
+
+- `code`: Python logic only
+- `hybrid`: Python first, then model judgment where configured
+- `model`: lean more heavily on Groq judgment
+
+### Scoring Components
+
+The `[scoring.components]` section defines the five base-score buckets:
+
+```toml
+[scoring.components]
+priority_match = 25
+company_match = 25
+recency = 15
+event_strength = 25
+corroboration = 10
+```
+
+The values must sum to 100. If you change one, adjust another.
+
+### Scoring Bands
+
+These sections control how the code maps article features into component points:
+
+- `[scoring.recency_bands]`
+- `[scoring.event_strength_bands]`
+- `[scoring.priority_match_bands]`
+- `[scoring.company_match_bands]`
+- `[scoring.corroboration_bands]`
+
+Examples:
+
+- Raise `within_7_days` if you want older-but-still-current stories to stay competitive.
+- Lower `opinion_or_listicle` if those articles are showing up too often.
+- Raise `watchlist_strategic_action` if company launches, acquisitions, and partnerships should dominate.
+- Lower `same_source_repeated` if repeated coverage from one source should not boost a cluster.
+
+### Critic / Reflection Loop
+
+The Critic reviews the proposed digest before it ships.
 
 ```toml
 [behavior]
 enable_critic = true
-max_critic_rounds = 1        # how many revision passes before the Orchestrator ships anyway
-critic_score_threshold = 70  # score below this triggers a revision request
+max_critic_rounds = 1
+critic_score_threshold = 70
 ```
 
-When enabled, the Orchestrator will ask the Critic to score the proposed digest after the Analyst runs. If the score is below the threshold, the Critic's revision notes are passed back to the Orchestrator and it tries another pass before finalizing.
+When enabled, the Orchestrator asks Critic to score the proposed digest. If the score is below the threshold and revision rounds remain, Critic's notes go back into the Orchestrator's context and the run tries another pass.
 
-To change what the Critic looks for, edit the `[critic]` prompt block.
+To change what Critic looks for, edit the `[critic]` prompt block.
 
-### 2. Scoring system
+### Dashboard Display
 
-These sections control the base Analyst rubric:
+The `[display]` section controls dashboard defaults:
 
-- `[scoring.freshness]`
-- `[scoring.max_points]`
-- `[scoring.event_strength]`
-- `[scoring]` for `low_value_phrases`
+```toml
+[display]
+page_size = 10
+default_scope = "latest"
+```
 
-Example:
+Use `default_scope = "latest"` for the most recent complete run, or `"all"` to show stored signals across runs.
 
-- raise `priority_match` if you want priority themes to matter more
-- lower `corroboration` if you do not want repeated coverage to boost a story as much
-- add phrases to `low_value_phrases` if you want more kinds of fluff penalized
+## What Lives Somewhere Else
 
-### 3. Behavior switches
+Use [configs/ai_tech.toml](/Users/ricopichardo/Claude/signal/configs/ai_tech.toml) for:
 
-The `[behavior]` section controls the easiest product decisions:
+- source list
+- source limits
+- source kinds such as `rss`, `youtube`, and `html_scrape`
+- priority groups, weights, and keywords
+- Groq model name and timeout
+- storage path
+- delivery digest limit
+- dashboard port and worker timeout
 
-- `scout_mode`: whether Scout uses code only, hybrid, or model help
-- `analyst_mode`: whether Analyst uses code only, hybrid, or model help
-- `relevance_policy`: `soft_keep` keeps borderline items for Analyst review
-- `scout_note_enabled`: turns internal Scout notes on/off
-- `model_score_adjustment_limit`: how far the model can move the base score
-- `analyst_review_limit`: how many top candidate stories get model-written summaries. The default is low so local runs stay reasonable.
-- `analyst_full_review`: off by default for faster local runs; turn it on when using a stronger model
-- `summary_mode`: short only or short plus expanded summary
-- `visuals_mode`: article image, icon fallback, or no visuals
-- `repeat_penalty_strength`: how strongly memory lowers repeated stories
-- `entity_extraction`: known names plus model-discovered names, or stricter modes
+The dashboard Settings tab includes editors for the common settings, including scoring weights, priority groups, and top-N knobs. Direct TOML editing is still the fallback for anything the UI does not expose.
 
-## What happens after you edit it
+## What Happens After You Edit
 
 Run Signal Stream again:
 
@@ -89,14 +152,14 @@ Then open the dashboard:
 python3 -m signal_stream dashboard --config configs/ai_tech.toml
 ```
 
-## Important note
+The next run uses your changes. Already-stored signals are not rewritten retroactively.
 
-You do **not** need to edit Python files just to change:
+## Safe Editing Checklist
 
-- prompts
-- behavior switches
-- scoring weights
-- low-value phrases
-- event-strength scores
+- Keep `[scoring.components]` summing to 100.
+- Keep `analyst_review_batch_size = 1` unless you intentionally want batched Groq review.
+- Keep `analyst_review_limit` at or below the number of articles you can afford to review.
+- Keep prompts asking for strict JSON when the worker expects structured output.
+- Export `GROQ_API_KEY` before live runs; Signal Stream does not auto-load `.env`.
 
-Those are now controlled by the brain file and the dashboard Settings page.
+You do not need to edit Python files just to change prompts, behavior switches, scoring bands, top-N review limits, Critic settings, or dashboard display preferences.
