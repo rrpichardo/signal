@@ -194,7 +194,7 @@ function ExecSummaryBlock({ signals }: { signals: Signal[] }) {
           <li key={s.id} className="flex items-baseline gap-3 text-ui">
             <span className="w-5 shrink-0 text-right font-mono text-muted-foreground/60 text-xs">{i + 1}</span>
             <Link
-              to={`/signals/${encodeURIComponent(s.id)}`}
+              to={`/signal/${encodeURIComponent(s.id)}`}
               className="flex-1 text-foreground hover:text-accent hover:underline"
             >
               {s.title}

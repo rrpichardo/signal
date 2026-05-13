@@ -15,6 +15,7 @@ export default function App() {
       <Route element={<RootLayout />}>
         <Route index element={<DigestPage />} />
         <Route path="signal/:id" element={<SignalDetailPage />} />
+        <Route path="signals/:id" element={<SignalDetailPage />} />
         <Route path="activity" element={<ActivityPage />} />
         <Route path="memory" element={<MemoryPage />} />
         <Route path="settings" element={<SettingsPage />} />
