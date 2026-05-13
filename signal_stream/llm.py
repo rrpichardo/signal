@@ -9,6 +9,9 @@ from urllib import error, request
 from .models import SignalConfig
 
 
+GROQ_USER_AGENT = "SignalStream/1.0"
+
+
 class BrainClient:
     def __init__(self, config: SignalConfig):
         self.config = config.brain
@@ -27,7 +30,10 @@ class BrainClient:
         try:
             req = request.Request(
                 "https://api.groq.com/openai/v1/models",
-                headers={"Authorization": f"Bearer {self._api_key}"},
+                headers={
+                    "Authorization": f"Bearer {self._api_key}",
+                    "User-Agent": GROQ_USER_AGENT,
+                },
                 method="GET",
             )
             with request.urlopen(req, timeout=8) as response:
@@ -92,6 +98,7 @@ class BrainClient:
             headers={
                 "Authorization": f"Bearer {self._api_key}",
                 "Content-Type": "application/json",
+                "User-Agent": GROQ_USER_AGENT,
             },
             method="POST",
         )
@@ -129,4 +136,3 @@ class BrainClient:
             self.last_error = str(exc)
             return None
         return parsed if isinstance(parsed, dict) else None
-
