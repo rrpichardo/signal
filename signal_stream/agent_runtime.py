@@ -7,6 +7,7 @@ import queue
 import subprocess
 import sys
 import threading
+import tomllib
 import traceback
 from typing import Any
 
@@ -154,6 +155,21 @@ class SignalAgentRuntime:
         self.prompts = load_prompt_set(config.agent.brain_file)
         self.behavior = load_behavior_settings(config.agent.brain_file)
 
+        # Merge only explicitly-set critic fields from the brain file into
+        # config.agent. self.behavior blends file values with defaults — checking
+        # it would silently override the agent TOML even when the brain file
+        # doesn't mention critic settings at all. Read the raw file instead.
+        _brain_path = Path(config.agent.brain_file).expanduser().resolve()
+        if _brain_path.exists():
+            with _brain_path.open("rb") as _fh:
+                _brain_behavior = tomllib.load(_fh).get("behavior", {})
+            if "enable_critic" in _brain_behavior:
+                self.config.agent.enable_critic = bool(_brain_behavior["enable_critic"])
+            if "max_critic_rounds" in _brain_behavior:
+                self.config.agent.max_critic_rounds = int(_brain_behavior["max_critic_rounds"])
+            if "critic_score_threshold" in _brain_behavior:
+                self.config.agent.critic_score_threshold = int(_brain_behavior["critic_score_threshold"])
+
     def run(self, goal: str | None = None) -> dict[str, Any]:
         self.storage.init()
         goal = goal or "Surface today's highest-signal AI/tech developments and prepare a digest."
@@ -188,6 +204,9 @@ class SignalAgentRuntime:
             "critic_notes": [],
             "actions": [],
             "finalized": False,
+            # Tells _mock_decision whether to issue critique_digest. Only relevant
+            # when allow_mock_brain=True; real brain decisions come from Groq.
+            "enable_critic_mock": self.config.agent.enable_critic,
         }
 
         try:

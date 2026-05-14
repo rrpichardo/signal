@@ -201,6 +201,9 @@ def analyze_articles(
         signals, review_context = _fetch_full_pages_for_top_n(signals, review_context, review_limit)
 
     signals, truncation_events = _apply_analyst_mode(signals, config, analyst_mode, analyst_prompt, behavior, review_context)
+    # Promote og:image for any signal that has no feed image but has a fetched og:image.
+    # Runs in all modes — the og:image was already extracted during full-page fetch.
+    _promote_og_images(signals, review_context)
     signals.sort(key=lambda item: item.score, reverse=True)
     digest = render_digest(config, signals, trace.events)
     return {
@@ -517,6 +520,29 @@ def _override_confidence(
     if missing_count >= 3:
         return "low"
     return model_confidence
+
+
+def _promote_og_images(signals: list[Signal], review_context: dict[str, dict[str, Any]]) -> None:
+    """Promote og:image to signal.image_url when the feed provided no image."""
+    for signal in signals:
+        if not signal.image_url:
+            og = review_context.get(signal.id, {}).get("og_image", "")
+            if og and _is_valid_og_image(og):
+                signal.image_url = og
+
+
+def _is_valid_og_image(url: str) -> bool:
+    """Return True if url looks like a real image (not a tracking pixel)."""
+    if not url.startswith(("http://", "https://")):
+        return False
+    lower = url.lower()
+    if "pixel" in lower or "track" in lower:
+        return False
+    from urllib.parse import parse_qs, urlparse
+    qs = parse_qs(urlparse(url).query)
+    if qs.get("w") == ["1"] or qs.get("h") == ["1"]:
+        return False
+    return True
 
 
 _FULL_PAGE_MIN_CHARS = 200    # body shorter than this → keep RSS body

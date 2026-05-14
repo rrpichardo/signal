@@ -8,14 +8,14 @@ import { SignalHoverCard } from "./SignalHoverCard";
 
 // Pick the visible blurb on the card. Prefers the model-written short_summary
 // (curated 2-3 sentences explaining why the article is worth reading); falls
-// back to the raw article lede clipped to ~200 chars when the analyst didn't
+// back to the raw article lede clipped to ~400 chars when the analyst didn't
 // produce one. Empty string when neither is available so the dek is hidden.
 function pickBlurb(signal: Signal): string {
   const short = (signal.short_summary ?? "").trim();
   if (short) return short;
   const summary = (signal.summary ?? "").trim();
   if (!summary) return "";
-  return summary.length > 200 ? `${summary.slice(0, 200).trimEnd()}…` : summary;
+  return summary.length > 400 ? `${summary.slice(0, 400).trimEnd()}…` : summary;
 }
 
 // Pick the hover-preview content. Prefers expanded_summary (multi-paragraph
@@ -55,7 +55,7 @@ export function SignalListItem({ signal, rank }: { signal: Signal; rank: number 
           </Link>
 
           {blurb && (
-            <p className="mb-3 text-body text-muted-foreground line-clamp-3">{blurb}</p>
+            <p className="mb-3 text-body text-muted-foreground line-clamp-4 max-h-[6.5rem]">{blurb}</p>
           )}
         </SignalHoverCard>
 
