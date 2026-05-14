@@ -107,8 +107,10 @@ class BrainClient:
                 raw = json.loads(response.read().decode("utf-8"))
         except error.HTTPError as exc:
             if exc.code == 429:
-                # Rate limit: sleep 60s and retry once.
-                time.sleep(60)
+                # Rate limit: sleep 15s and retry once. Was 60s, which caused
+                # the analyst to blow the 2400s worker timeout when many articles
+                # hit the limit in the same batch.
+                time.sleep(15)
                 try:
                     with request.urlopen(req, timeout=self.config.timeout_seconds) as response:
                         raw = json.loads(response.read().decode("utf-8"))
