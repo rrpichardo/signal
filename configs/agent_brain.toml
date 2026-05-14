@@ -133,6 +133,9 @@ entity_extraction = "hybrid"
 enable_critic = true
 max_critic_rounds = 1
 critic_score_threshold = 70
+# Editor full-text fallback cap: max signals re-fetched per run when artifacts are thin.
+# Eligible signals are ranked by trigger severity (missing > truncated > critic-flagged > low-confidence > vague).
+editor_fulltext_fallback_cap = 3
 
 [scoring.components]
 # 5 components. Sum must equal 100.
