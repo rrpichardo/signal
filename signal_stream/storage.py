@@ -136,9 +136,12 @@ class SignalStorage:
             _ensure_column(conn, "signals", "icon_key", "text")
             _ensure_column(conn, "signals", "scout_note", "text")
             _ensure_column(conn, "signals", "relevance_label", "text")
-            # Phase 4: per-signal analyst artifact (mechanism, key_actors, evidence, confidence, truncation meta).
-            # Written post-hoc by the Editor fallback; NULL on signals from older runs.
+            # Phase 2/4: per-signal analyst artifact (mechanism, key_actors, evidence, confidence, truncation meta).
             _ensure_column(conn, "signals", "analyst_artifact_json", "text")
+            # Phase 3/4/5: Editor briefing columns on agent_runs.
+            _ensure_column(conn, "agent_runs", "briefing_json", "text")
+            _ensure_column(conn, "agent_runs", "briefing_status", "text")
+            _ensure_column(conn, "agent_runs", "briefing_error", "text")
 
     def save_run(self, articles: list[Article], signals: list[Signal], cluster_count: int, output_path: str, started_at: str) -> None:
         completed_at = utc_now_iso()
@@ -478,7 +481,7 @@ class SignalStorage:
         }
 
     def get_signal(self, signal_id: str) -> dict[str, Any] | None:
-        """Return a single signal by ID with the full score_breakdown included."""
+        """Return a single signal by ID with score_breakdown and analyst_artifact included."""
         with self.connect() as conn:
             row = conn.execute(
                 """
@@ -540,6 +543,33 @@ class SignalStorage:
             "output_path": summary.get("output_path", ""),
         }
 
+    def get_latest_briefing(self) -> dict[str, Any]:
+        """Return the executive briefing for the most recent complete run.
+
+        Returns a dict with briefing, briefing_status, generated_at,
+        source_signal_ids, and run_id. When no complete run exists or the run
+        has no briefing yet, briefing is null and status is 'skipped'.
+        """
+        with self.connect() as conn:
+            row = conn.execute(
+                "select id, briefing_json, briefing_status, briefing_error "
+                "from agent_runs where status = 'complete' "
+                "order by started_at desc, completed_at desc, id desc limit 1"
+            ).fetchone()
+        if not row:
+            return {"briefing": None, "briefing_status": "skipped", "generated_at": None, "source_signal_ids": [], "run_id": None}
+        try:
+            briefing = json.loads(row["briefing_json"] or "null")
+        except json.JSONDecodeError:
+            briefing = None
+        return {
+            "briefing": briefing,
+            "briefing_status": row["briefing_status"] or "skipped",
+            "generated_at": briefing.get("generated_at") if briefing else None,
+            "source_signal_ids": briefing.get("source_signal_ids", []) if briefing else [],
+            "run_id": row["id"],
+        }
+
     def _hydrate_signal_row(self, row: Any, *, slim: bool = False) -> dict[str, Any]:
         # Shared post-processing for signal rows: parse JSON fields and apply UI fallbacks.
         # slim=True omits score_breakdown — used by the list endpoint to reduce payload size.
@@ -556,12 +586,14 @@ class SignalStorage:
             item["entities"] = json.loads(item.pop("entities_json") or "{}")
         except json.JSONDecodeError:
             item["entities"] = {}
-        # analyst_artifact_json is NULL on signals from older runs — always parse safely.
-        raw_artifact = item.pop("analyst_artifact_json", None)
-        try:
-            item["analyst_artifact"] = json.loads(raw_artifact) if raw_artifact else None
-        except json.JSONDecodeError:
-            item["analyst_artifact"] = None
+        # analyst_artifact_json is only selected by get_signal (detail endpoint).
+        # Parse it when present; old signals without the column return null.
+        if "analyst_artifact_json" in item:
+            try:
+                item["analyst_artifact"] = json.loads(item.pop("analyst_artifact_json") or "null")
+            except json.JSONDecodeError:
+                item.pop("analyst_artifact_json", None)
+                item["analyst_artifact"] = None
         item["short_summary"] = item.get("short_summary") or item.get("summary") or ""
         item["expanded_summary"] = item.get("expanded_summary") or item.get("short_summary") or ""
         item["icon_key"] = item.get("icon_key") or item.get("event_type") or "signal"

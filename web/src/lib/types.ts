@@ -13,6 +13,26 @@ export interface ScoreBreakdownItem {
   [key: string]: unknown;
 }
 
+// Richer per-signal artifact written by the Analyst (Phase 2+).
+// All fields optional — old signals return analyst_artifact: null.
+export interface AnalystArtifact {
+  mechanism?: string;
+  key_actors?: Array<{ name: string; role: string }>;
+  affected_parties?: string[];
+  evidence_excerpts?: Array<{ quote: string; source_offset?: number }>;
+  confidence?: "low" | "medium" | "high";
+  confidence_reason?: string;
+  model_confidence?: "low" | "medium" | "high";
+  critic_flags?: string[];
+  _meta?: {
+    was_truncated: boolean;
+    chars_total: number;
+    chars_sent: number;
+    extraction_quality?: "good" | "partial" | "poor";
+    refresh_source?: string;
+  };
+}
+
 export interface Signal {
   id: string;
   title: string;
@@ -35,6 +55,8 @@ export interface Signal {
   scout_note: string;
   relevance_label: string;
   created_at: string;
+  // Present on /api/signals/<id> for runs that have Phase 2+ artifacts; null otherwise.
+  analyst_artifact?: AnalystArtifact | null;
 }
 
 // Agent run header — what /api/run/latest returns. summary_json arrives as a
@@ -131,4 +153,33 @@ export interface BrainSettings {
   scoring?: Record<string, unknown>;
   reader?: Record<string, unknown>;
   [key: string]: unknown;
+}
+
+// Executive briefing written by the Editor worker (Phase 3+).
+export interface ExecutiveBriefingTheme {
+  label: string;
+  signal_ids: string[];
+  summary: string;
+}
+
+export interface ExecutiveBriefing {
+  headline: string;
+  briefing_paragraphs: string[];
+  key_themes: ExecutiveBriefingTheme[];
+  watch_items: string[];
+  cross_signal_narrative?: string;
+  source_signal_ids: string[];
+  input_artifact_count: number;
+  artifact_coverage: { with_artifact: number; missing: number; thin: number };
+  any_artifact_truncated: boolean;
+  generated_at: string;
+}
+
+// /api/executive-briefing response shape.
+export interface ExecutiveBriefingResponse {
+  briefing: ExecutiveBriefing | null;
+  briefing_status: "pending" | "generated" | "partial" | "failed" | "skipped";
+  generated_at: string | null;
+  source_signal_ids: string[];
+  run_id: string | null;
 }

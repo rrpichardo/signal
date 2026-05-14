@@ -1,13 +1,13 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { useDisplaySettings, useExecutiveSummary, useLatestRun, useSignals } from "@/lib/queries";
+import { useDisplaySettings, useExecutiveBriefing, useExecutiveSummary, useLatestRun, useSignals } from "@/lib/queries";
 import { FeaturedSignal } from "@/components/signals/FeaturedSignal";
 import { SignalListItem } from "@/components/signals/SignalListItem";
 import { Pagination } from "@/components/Pagination";
 import { Skeleton } from "@/components/ui/skeleton";
 import { relativeTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import type { AgentRun, Signal } from "@/lib/types";
+import type { AgentRun, ExecutiveBriefing, Signal } from "@/lib/types";
 
 type Scope = "latest" | "all";
 
@@ -39,6 +39,7 @@ export default function DigestPage() {
   const { data: response, isLoading, error } = useSignals({ scope, page });
   const { data: run } = useLatestRun();
   const { data: execSignals } = useExecutiveSummary();
+  const { data: briefingData } = useExecutiveBriefing();
 
   const hasRun = run && "id" in run;
   const latestAgentRun = hasRun ? (run as AgentRun) : null;
@@ -118,6 +119,12 @@ export default function DigestPage() {
         </div>
       )}
 
+      {/* Editor briefing — model-written narrative above the exec list.
+          Only shown on page 1 of the latest scope when the Editor has run. */}
+      {scope === "latest" && page === 1 && (briefingData?.briefing_status === "generated" || briefingData?.briefing_status === "partial") && briefingData.briefing && (
+        <BriefingBlock briefing={briefingData.briefing} status={briefingData.briefing_status} />
+      )}
+
       {/* Executive summary — top 12 signals at a glance. Only shown on page 1 of latest scope. */}
       {scope === "latest" && page === 1 && execSignals && execSignals.length > 0 && (
         <ExecSummaryBlock signals={execSignals} />
@@ -179,6 +186,73 @@ function ScopeToggle({ scope, onChange }: { scope: Scope; onChange: (s: Scope) =
       >
         All time
       </button>
+    </div>
+  );
+}
+
+// Model-written briefing from the Editor worker. Renders above the exec list
+// when the Editor has produced a briefing for the latest run.
+function BriefingBlock({ briefing, status }: { briefing: ExecutiveBriefing; status: string }) {
+  return (
+    <div className="mb-8 rounded-md border border-border bg-muted/20 p-6">
+      <div className="kicker mb-3">Intelligence briefing</div>
+
+      {/* Headline */}
+      <p className="mb-4 font-serif text-h3 font-semibold leading-snug text-foreground">
+        {briefing.headline}
+      </p>
+
+      {/* Narrative paragraphs */}
+      {briefing.briefing_paragraphs?.length > 0 && (
+        <div className="mb-5 space-y-3">
+          {briefing.briefing_paragraphs.map((para, i) => (
+            <p key={i} className="text-body text-foreground/85">{para}</p>
+          ))}
+        </div>
+      )}
+
+      {/* Key themes */}
+      {briefing.key_themes?.length > 0 && (
+        <div className="mb-5">
+          <div className="kicker mb-2">Key themes</div>
+          <ul className="space-y-2">
+            {briefing.key_themes.map((theme, i) => (
+              <li key={i} className="text-ui">
+                <span className="font-medium text-foreground">{theme.label}</span>
+                {theme.summary && (
+                  <span className="ml-2 text-muted-foreground">— {theme.summary}</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Watch items */}
+      {briefing.watch_items?.length > 0 && (
+        <div className="mb-4">
+          <div className="kicker mb-2">Watch</div>
+          <ul className="list-disc space-y-1 pl-5">
+            {briefing.watch_items.map((item, i) => (
+              <li key={i} className="text-ui text-foreground/85">{item}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Footnotes: partial coverage warning, truncation note */}
+      <div className="mt-4 space-y-1">
+        {status === "partial" && (
+          <p className="text-meta text-muted-foreground">
+            Some signals were summarized without full article text — coverage may be incomplete.
+          </p>
+        )}
+        {briefing.any_artifact_truncated && (
+          <p className="text-meta text-muted-foreground">
+            One or more articles were truncated during analysis.
+          </p>
+        )}
+      </div>
     </div>
   );
 }
