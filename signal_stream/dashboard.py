@@ -151,7 +151,7 @@ def serve_dashboard(
     def _sweep_loop() -> None:
         while not _stop_sweeper.is_set():
             try:
-                swept = storage.mark_runs_failed_if_idle(max_idle_seconds=300)
+                swept = storage.mark_runs_failed_if_idle(max_idle_seconds=1200)
                 if swept:
                     print(
                         f"[signal_stream] swept {len(swept)} stale run(s): {', '.join(swept)}",
