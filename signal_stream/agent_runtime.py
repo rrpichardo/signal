@@ -176,6 +176,9 @@ class SignalAgentRuntime:
             if self.config.agent.enable_critic
             else None
         )
+        # Editor always spawns — it runs best-effort after Critic approval and
+        # never blocks run completion even if it fails or times out.
+        editor = WorkerClient("editor", self.config_path, self.config.agent.worker_timeout_seconds)
         state: dict[str, Any] = {
             "goal": goal,
             "articles": [],
@@ -320,6 +323,13 @@ class SignalAgentRuntime:
                     run_id, "Analyst", "writing_digest",
                     f"Preparing digest: {len(signals)} signals, executive summary: top {exec_limit}.", {}
                 )
+                # Editor runs after Critic approval, before the atomic save.
+                # It's best-effort: failure writes briefing_status='failed' but
+                # never prevents the run from reaching status='complete'.
+                raw_exec_signals = list(state.get("analysis", {}).get("signals", []))[:exec_limit]
+                briefing_json, briefing_status, briefing_error = self._call_editor(
+                    run_id, editor, raw_exec_signals
+                )
                 self.storage.save_run_atomic(
                     articles=collected,
                     signals=signals,
@@ -328,6 +338,9 @@ class SignalAgentRuntime:
                     started_at=utc_now_iso(),
                     run_id=run_id,
                     summary=summary,
+                    briefing_json=briefing_json,
+                    briefing_status=briefing_status,
+                    briefing_error=briefing_error,
                 )
                 for signal in exec_signals:
                     # Memory is how Signal Stream avoids acting like every day is day
@@ -381,6 +394,7 @@ class SignalAgentRuntime:
             analyst.close()
             if critic is not None:
                 critic.close()
+            editor.close()
 
     def _decide(self, run_id: str, state: dict[str, Any], iteration: int) -> AgentDecision:
         """Ask the brain what the Orchestrator should do next."""
@@ -459,6 +473,80 @@ class SignalAgentRuntime:
             )
         )
         return result
+
+    def _call_editor(
+        self,
+        run_id: str,
+        editor: WorkerClient,
+        raw_signals: list[dict[str, Any]],
+    ) -> tuple[str | None, str, str]:
+        """Run the Editor worker and return (briefing_json_str, status, error).
+
+        Always returns a 3-tuple — never raises. The caller persists whatever
+        comes back; a failure here must not prevent the run from completing.
+        """
+        if not raw_signals:
+            self.storage.save_agent_event(
+                run_id, "Editor", "skipped", "No signals to brief; skipping Editor.", {}
+            )
+            return None, "skipped", ""
+
+        run_context = {
+            "organization": self.config.organization,
+            "audience": self.config.audience,
+            "priorities": [
+                {"name": p.name, "description": p.description}
+                for p in self.config.priorities[:5]
+            ],
+        }
+
+        try:
+            result = self._call_worker(
+                run_id,
+                editor,
+                "generate_briefing",
+                {"signals": raw_signals, "run_context": run_context},
+            )
+        except Exception as exc:  # noqa: BLE001 - best-effort; never block run completion.
+            err = str(exc)
+            self.storage.save_agent_event(
+                run_id, "Editor", "failed", f"Editor worker error: {err}", {"error": err}
+            )
+            return None, "failed", err
+
+        if result.get("status") == "error":
+            err = str(result.get("error", "Editor returned an error status."))
+            self.storage.save_agent_event(
+                run_id, "Editor", "failed", f"Editor task error: {err}", {"error": err}
+            )
+            return None, "failed", err
+
+        data = result.get("data", {})
+        briefing = data.get("briefing")
+        status = str(data.get("briefing_status", "generated"))
+
+        if briefing is None:
+            # Worker returned ok but no briefing dict (e.g. zero signals path).
+            self.storage.save_agent_event(run_id, "Editor", "skipped", "Editor returned no briefing.", {})
+            return None, "skipped", ""
+
+        import json as _json
+        try:
+            briefing_str = _json.dumps(briefing, sort_keys=True)
+        except (TypeError, ValueError) as exc:
+            err = f"Failed to serialize briefing: {exc}"
+            self.storage.save_agent_event(run_id, "Editor", "failed", err, {"error": err})
+            return None, "failed", err
+
+        coverage = briefing.get("artifact_coverage", {})
+        self.storage.save_agent_event(
+            run_id,
+            "Editor",
+            "generated",
+            f"Briefing {status}: {len(raw_signals)} signals, coverage {coverage}.",
+            {"briefing_status": status, "artifact_coverage": coverage},
+        )
+        return briefing_str, status, ""
 
     def _write_digest(self, run_id: str, state: dict[str, Any]) -> str:
         output_dir = Path(self.config.output_dir)

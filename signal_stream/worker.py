@@ -11,6 +11,7 @@ from typing import Any
 
 from .analysis_tools import analyze_articles, score_digest_quality
 from .config import load_config
+from .editor_tools import generate_briefing_from_artifacts
 from .llm import BrainClient
 from .models import SourceConfig
 from .prompt_loader import load_behavior_settings, load_prompt_set, load_scoring_rubric
@@ -34,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
     """
 
     parser = argparse.ArgumentParser(description="Signal Stream worker process.")
-    parser.add_argument("agent", choices=["scout", "analyst", "critic"])
+    parser.add_argument("agent", choices=["scout", "analyst", "critic", "editor"])
     parser.add_argument("--config", default="configs/ai_tech.toml")
     args = parser.parse_args(argv)
 
@@ -148,6 +149,25 @@ def handle_task(
         # Confidence is high when the score is high — nothing suspicious.
         confidence = max(0.1, min(1.0, data.get("score", 0) / 100))
         return _ok(task_id, agent, data, confidence)
+
+    if agent == "editor" and task_type == "generate_briefing":
+        top_signals = list(payload.get("signals", []))
+        run_context = dict(payload.get("run_context") or {})
+        editor_prompt = prompts.get("editor", "You are the Signal Stream Editor. Write an executive briefing in JSON.")
+
+        # Zero signals → skip cleanly without a Groq call.
+        if not top_signals:
+            return _ok(task_id, agent, {"briefing": None, "briefing_status": "skipped"}, 0.0)
+
+        llm = BrainClient(config)
+        briefing = generate_briefing_from_artifacts(top_signals, llm, editor_prompt, run_context)
+
+        # partial when any signal lacked a rich artifact; generated when all had one.
+        coverage = briefing.get("artifact_coverage", {})
+        has_gap = coverage.get("missing", 0) > 0 or coverage.get("thin", 0) > 0
+        status = "partial" if has_gap else "generated"
+
+        return _ok(task_id, agent, {"briefing": briefing, "briefing_status": status}, 0.9)
 
     return {
         "task_id": task_id,

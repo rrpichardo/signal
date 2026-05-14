@@ -136,6 +136,12 @@ class SignalStorage:
             _ensure_column(conn, "signals", "icon_key", "text")
             _ensure_column(conn, "signals", "scout_note", "text")
             _ensure_column(conn, "signals", "relevance_label", "text")
+            # Phase 2 artifact column — safe to add now; old rows read back as null.
+            _ensure_column(conn, "signals", "analyst_artifact_json", "text")
+            # Phase 3 briefing columns on agent_runs.
+            _ensure_column(conn, "agent_runs", "briefing_json", "text")
+            _ensure_column(conn, "agent_runs", "briefing_status", "text")
+            _ensure_column(conn, "agent_runs", "briefing_error", "text")
 
     def save_run(self, articles: list[Article], signals: list[Signal], cluster_count: int, output_path: str, started_at: str) -> None:
         completed_at = utc_now_iso()
@@ -241,6 +247,10 @@ class SignalStorage:
         started_at: str,
         run_id: str,
         summary: dict[str, Any] | None = None,
+        *,
+        briefing_json: str | None = None,
+        briefing_status: str | None = None,
+        briefing_error: str | None = None,
     ) -> None:
         """Persist a successful run as one atomic transaction.
 
@@ -346,9 +356,20 @@ class SignalStorage:
             # Flip agent_runs.status to 'complete' inside the same transaction
             # — this is the contract the cursor depends on. If anything above
             # raised, this update never lands and the cursor stays put.
+            # Briefing fields are written in the same transaction so a failed
+            # briefing never partially lands in a separate commit.
             conn.execute(
-                "update agent_runs set status = ?, completed_at = ?, summary_json = ? where id = ?",
-                ("complete", completed_at, summary_json, run_id),
+                "update agent_runs set status = ?, completed_at = ?, summary_json = ?, "
+                "briefing_json = ?, briefing_status = ?, briefing_error = ? where id = ?",
+                (
+                    "complete",
+                    completed_at,
+                    summary_json,
+                    briefing_json,
+                    briefing_status or "skipped",
+                    briefing_error or "",
+                    run_id,
+                ),
             )
 
     def latest_complete_agent_run_started_at(self) -> str | None:
@@ -535,6 +556,30 @@ class SignalStorage:
             "cluster_count": summary.get("cluster_count", 0),
             "signal_count": summary.get("signals", 0),
             "output_path": summary.get("output_path", ""),
+        }
+
+    def get_run_briefing(self, run_id: str) -> dict[str, Any] | None:
+        """Return the briefing for a specific agent_run, or None if not present."""
+        with self.connect() as conn:
+            row = conn.execute(
+                "select briefing_json, briefing_status, briefing_error from agent_runs where id = ?",
+                (run_id,),
+            ).fetchone()
+        if not row:
+            return None
+        raw = row["briefing_json"] if "briefing_json" in row.keys() else None
+        status = row["briefing_status"] if "briefing_status" in row.keys() else None
+        error = row["briefing_error"] if "briefing_error" in row.keys() else None
+        briefing = None
+        if raw:
+            try:
+                briefing = json.loads(raw)
+            except json.JSONDecodeError:
+                briefing = None
+        return {
+            "briefing": briefing,
+            "briefing_status": status or "skipped",
+            "briefing_error": error or "",
         }
 
     def _hydrate_signal_row(self, row: Any, *, slim: bool = False) -> dict[str, Any]:
