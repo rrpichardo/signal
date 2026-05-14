@@ -1,13 +1,13 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { useDisplaySettings, useExecutiveBriefing, useExecutiveSummary, useLatestRun, useSignals } from "@/lib/queries";
+import { useDisplaySettings, useExecutiveBriefing, useLatestRun, useSignals } from "@/lib/queries";
 import { FeaturedSignal } from "@/components/signals/FeaturedSignal";
 import { SignalListItem } from "@/components/signals/SignalListItem";
 import { Pagination } from "@/components/Pagination";
 import { Skeleton } from "@/components/ui/skeleton";
 import { relativeTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import type { AgentRun, ExecutiveBriefing, Signal } from "@/lib/types";
+import type { AgentRun, ExecutiveBriefing } from "@/lib/types";
 
 type Scope = "latest" | "all";
 
@@ -38,7 +38,6 @@ export default function DigestPage() {
 
   const { data: response, isLoading, error } = useSignals({ scope, page });
   const { data: run } = useLatestRun();
-  const { data: execSignals } = useExecutiveSummary();
   const { data: briefingData } = useExecutiveBriefing();
 
   const hasRun = run && "id" in run;
@@ -89,6 +88,17 @@ export default function DigestPage() {
   const total = response?.total ?? 0;
   const totalPages = response?.total_pages ?? 0;
   const runStartedAt = response?.run?.started_at ?? latestAgentRun?.started_at;
+  // Sparse-run hint: when the latest run produced only a small handful of
+  // signals, point the reader to All time so they don't think the product is
+  // broken. The number comes from the latest run's summary (signal_count),
+  // which is the run's own self-report — not the current page slice.
+  const latestRunSignalCount = response?.run?.signal_count ?? null;
+  const showSparseHint =
+    scope === "latest" &&
+    page === 1 &&
+    latestRunSignalCount !== null &&
+    latestRunSignalCount > 0 &&
+    latestRunSignalCount < 3;
 
   return (
     <div>
@@ -119,15 +129,48 @@ export default function DigestPage() {
         </div>
       )}
 
-      {/* Editor briefing — model-written narrative above the exec list.
-          Only shown on page 1 of the latest scope when the Editor has run. */}
-      {scope === "latest" && page === 1 && (briefingData?.briefing_status === "generated" || briefingData?.briefing_status === "partial") && briefingData.briefing && (
-        <BriefingBlock briefing={briefingData.briefing} status={briefingData.briefing_status} />
+      {/* Sparse-run hint — when the latest run produced only 1 or 2 signals,
+          most readers want to see the broader feed. Surface All time before
+          the briefing so the reader knows there's more to look at. */}
+      {showSparseHint && (
+        <div className="mb-6 rounded-md border border-dashed border-border bg-muted/10 px-4 py-3 text-meta text-muted-foreground">
+          Latest run found {latestRunSignalCount} new{" "}
+          {latestRunSignalCount === 1 ? "signal" : "signals"} — see{" "}
+          <button
+            type="button"
+            onClick={() => setScope("all")}
+            className="underline underline-offset-2 hover:text-foreground"
+          >
+            All time
+          </button>{" "}
+          for the full feed.
+        </div>
       )}
 
-      {/* Executive summary — top 12 signals at a glance. Only shown on page 1 of latest scope. */}
-      {scope === "latest" && page === 1 && execSignals && execSignals.length > 0 && (
-        <ExecSummaryBlock signals={execSignals} />
+      {/* Editor briefing — model-written narrative above the digest list. Shown
+          on page 1 of the latest scope when the Editor has run. The backend
+          may serve a *prior* run's briefing tagged stale=true when the latest
+          run was too weak; we render a "showing previous briefing" note in
+          that case instead of pretending the briefing is fresh. */}
+      {scope === "latest" && page === 1 && (briefingData?.briefing_status === "generated" || briefingData?.briefing_status === "partial") && briefingData.briefing && (
+        <BriefingBlock
+          briefing={briefingData.briefing}
+          status={briefingData.briefing_status}
+          stale={briefingData.stale}
+          staleRunStartedAt={briefingData.stale_run_started_at}
+        />
+      )}
+
+      {/* Missing-briefing hint — shown when the latest run has no briefing
+          (status is pending / failed / skipped, or the column is NULL for
+          pre-Phase-3 runs). Tells the reader the feature exists but didn't
+          produce output this run, instead of silently hiding. */}
+      {scope === "latest" && page === 1 && briefingData &&
+       briefingData.briefing_status !== "generated" &&
+       briefingData.briefing_status !== "partial" && (
+        <div className="mb-8 rounded-md border border-dashed border-border bg-muted/10 px-4 py-3 text-meta text-muted-foreground">
+          Intelligence briefing not generated for this run — re-run the agent to produce one.
+        </div>
       )}
 
       {/* Empty state — when the run produced 0 signals, or there are no signals at all. */}
@@ -190,12 +233,35 @@ function ScopeToggle({ scope, onChange }: { scope: Scope; onChange: (s: Scope) =
   );
 }
 
-// Model-written briefing from the Editor worker. Renders above the exec list
-// when the Editor has produced a briefing for the latest run.
-function BriefingBlock({ briefing, status }: { briefing: ExecutiveBriefing; status: string }) {
+// Model-written briefing from the Editor worker. Renders above the digest
+// list when the Editor has produced a briefing for the latest run — or, when
+// stale=true, when the backend served a *prior* run's briefing because the
+// latest run was too weak. The stale note tells the reader the briefing is
+// not fresh, so they don't think the dashboard is broken.
+function BriefingBlock({
+  briefing,
+  status,
+  stale,
+  staleRunStartedAt,
+}: {
+  briefing: ExecutiveBriefing;
+  status: string;
+  stale: boolean;
+  staleRunStartedAt: string | null;
+}) {
   return (
     <div className="mb-8 rounded-md border border-border bg-muted/20 p-6">
       <div className="kicker mb-3">Intelligence briefing</div>
+
+      {/* Stale-briefing note. Only renders when the briefing came from a
+          prior run. Reads "showing previous briefing from X ago" so the
+          reader can tell at a glance that today's run didn't produce
+          enough new signal to refresh the headline. */}
+      {stale && staleRunStartedAt && (
+        <p className="mb-4 text-meta text-muted-foreground">
+          Not enough new signal to update — showing previous briefing from {relativeTime(staleRunStartedAt)}.
+        </p>
+      )}
 
       {/* Headline */}
       <p className="mb-4 font-serif text-h3 font-semibold leading-snug text-foreground">
@@ -253,30 +319,6 @@ function BriefingBlock({ briefing, status }: { briefing: ExecutiveBriefing; stat
           </p>
         )}
       </div>
-    </div>
-  );
-}
-
-// Compact numbered list of top-12 signals. Gives readers a scannable headline
-// view before they commit to the full featured card below.
-function ExecSummaryBlock({ signals }: { signals: Signal[] }) {
-  return (
-    <div className="mb-10 rounded-md border border-border bg-muted/30 p-5">
-      <div className="kicker mb-3">Executive summary — top {signals.length}</div>
-      <ol className="space-y-2">
-        {signals.map((s, i) => (
-          <li key={s.id} className="flex items-baseline gap-3 text-ui">
-            <span className="w-5 shrink-0 text-right font-mono text-muted-foreground/60 text-xs">{i + 1}</span>
-            <Link
-              to={`/signal/${encodeURIComponent(s.id)}`}
-              className="flex-1 text-foreground hover:text-accent hover:underline"
-            >
-              {s.title}
-            </Link>
-            <span className="shrink-0 font-mono text-xs text-muted-foreground">{s.score}</span>
-          </li>
-        ))}
-      </ol>
     </div>
   );
 }

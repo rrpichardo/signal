@@ -182,4 +182,7 @@ export interface ExecutiveBriefingResponse {
   generated_at: string | null;
   source_signal_ids: string[];
   run_id: string | null;
+  stale: boolean;
+  stale_from_run_id: string | null;
+  stale_run_started_at: string | null;
 }

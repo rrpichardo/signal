@@ -555,32 +555,123 @@ class SignalStorage:
             "output_path": summary.get("output_path", ""),
         }
 
-    def get_latest_briefing(self) -> dict[str, Any]:
+    def get_latest_briefing(self, min_signal_score: int = 0) -> dict[str, Any]:
         """Return the executive briefing for the most recent complete run.
 
-        Returns a dict with briefing, briefing_status, generated_at,
-        source_signal_ids, and run_id. When no complete run exists or the run
-        has no briefing yet, briefing is null and status is 'skipped'.
+        When `min_signal_score` > 0, applies a fallback rule: if the latest
+        complete run's strongest signal does not clear the floor, walk back
+        through prior complete runs and return the most recent one whose
+        briefing was generated/partial AND has at least one signal at or above
+        the floor. The response is tagged with `stale: true` and includes the
+        fallback run's id and started_at when the briefing isn't from the
+        latest run.
         """
+        # 1) Pull the full list of complete runs in newest-first order so we
+        #    can walk back if the latest one is too weak. Limiting to ~20
+        #    keeps the query cheap; runs older than that almost certainly
+        #    aren't useful to surface as "today's" briefing anyway.
         with self.connect() as conn:
-            row = conn.execute(
-                "select id, briefing_json, briefing_status, briefing_error "
+            rows = conn.execute(
+                "select id, started_at, briefing_json, briefing_status "
                 "from agent_runs where status = 'complete' "
-                "order by started_at desc, completed_at desc, id desc limit 1"
-            ).fetchone()
-        if not row:
-            return {"briefing": None, "briefing_status": "skipped", "generated_at": None, "source_signal_ids": [], "run_id": None}
+                "order by started_at desc, completed_at desc, id desc limit 20"
+            ).fetchall()
+
+        if not rows:
+            return {
+                "briefing": None,
+                "briefing_status": "skipped",
+                "generated_at": None,
+                "source_signal_ids": [],
+                "run_id": None,
+                "stale": False,
+                "stale_from_run_id": None,
+                "stale_run_started_at": None,
+            }
+
+        latest = rows[0]
+
+        def _qualifies(index: int) -> bool:
+            """Run at `index` qualifies if its briefing produced output AND
+            its strongest signal clears the floor. With min_signal_score=0,
+            the score check collapses to True so this preserves legacy
+            behavior. The signal-score lookup is bounded by the next-newer
+            run's start time so we don't accidentally count signals from
+            other runs (the signals table has no run_id column)."""
+            row = rows[index]
+            status = (row["briefing_status"] or "").lower()
+            if status not in ("generated", "partial"):
+                return False
+            if min_signal_score <= 0:
+                return True
+            # Upper bound = next-newer run's started_at, or None for the latest.
+            upper = rows[index - 1]["started_at"] if index > 0 else None
+            return self._run_max_signal_score(row["started_at"], upper) >= min_signal_score
+
+        # 2) Pick the run to surface. Try the latest first; fall back to the
+        #    most recent qualifying prior run when the latest is too weak.
+        #    If nothing qualifies, we deliberately do NOT show the weak latest
+        #    briefing — the dashboard renders the "not enough new signal" path
+        #    instead, so the reader isn't given a 30/100 article as today's
+        #    headline.
+        if _qualifies(0):
+            chosen = latest
+            is_stale = False
+        else:
+            fallback = next((rows[i] for i in range(1, len(rows)) if _qualifies(i)), None)
+            if fallback is not None:
+                chosen = fallback
+                is_stale = True
+            else:
+                # No prior run is strong enough either. Return a "skipped"
+                # response so the existing missing-briefing message fires.
+                return {
+                    "briefing": None,
+                    "briefing_status": "skipped",
+                    "generated_at": None,
+                    "source_signal_ids": [],
+                    "run_id": latest["id"],
+                    "stale": False,
+                    "stale_from_run_id": None,
+                    "stale_run_started_at": None,
+                }
+
         try:
-            briefing = json.loads(row["briefing_json"] or "null")
+            briefing = json.loads(chosen["briefing_json"] or "null")
         except json.JSONDecodeError:
             briefing = None
+
         return {
             "briefing": briefing,
-            "briefing_status": row["briefing_status"] or "skipped",
+            "briefing_status": chosen["briefing_status"] or "skipped",
             "generated_at": briefing.get("generated_at") if briefing else None,
             "source_signal_ids": briefing.get("source_signal_ids", []) if briefing else [],
-            "run_id": row["id"],
+            "run_id": chosen["id"],
+            "stale": is_stale,
+            "stale_from_run_id": chosen["id"] if is_stale else None,
+            "stale_run_started_at": chosen["started_at"] if is_stale else None,
         }
+
+    def _run_max_signal_score(self, run_started_at: str, next_run_started_at: str | None) -> int:
+        """Highest signal score for signals belonging to one run.
+
+        Signals don't carry a run_id, so we bracket by time: lower bound is
+        the run's started_at, upper bound is the *next-newer* run's
+        started_at (None means there is no newer run). Returns 0 when the
+        run produced no signals."""
+        with self.connect() as conn:
+            if next_run_started_at is None:
+                row = conn.execute(
+                    "select max(score) as top from signals where created_at >= ?",
+                    (run_started_at,),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "select max(score) as top from signals "
+                    "where created_at >= ? and created_at < ?",
+                    (run_started_at, next_run_started_at),
+                ).fetchone()
+        return int(row["top"]) if row and row["top"] is not None else 0
 
     def _hydrate_signal_row(self, row: Any, *, slim: bool = False) -> dict[str, Any]:
         # Shared post-processing for signal rows: parse JSON fields and apply UI fallbacks.

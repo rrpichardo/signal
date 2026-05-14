@@ -36,15 +36,6 @@ export function useSignal(id: string | undefined) {
   });
 }
 
-// Top-N signals by score from the latest run — feeds the exec summary header.
-export function useExecutiveSummary() {
-  return useQuery({
-    queryKey: ["signals/executive"],
-    queryFn: api.executiveSummary,
-    refetchInterval: LIVE_INTERVAL,
-  });
-}
-
 // Editor-generated briefing for the latest complete run.
 // Falls back to null briefing when no Editor has run (status="skipped").
 export function useExecutiveBriefing() {

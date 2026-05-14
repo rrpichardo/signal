@@ -31,7 +31,7 @@ export function RunStatusPill() {
           status === "idle" && "bg-muted-foreground/40",
         )}
       />
-      <span className="font-medium text-foreground">{signalCount} signals</span>
+      <span className="font-medium text-foreground">{signalCount} {signalCount === 1 ? "signal" : "signals"}</span>
       {startedAt && <span aria-hidden>·</span>}
       {startedAt && <span>{relativeTime(startedAt)}</span>}
     </Link>

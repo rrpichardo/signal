@@ -15,7 +15,7 @@ You can choose only these actions:
 - collect_sources: ask Scout to fetch configured RSS, blog, and YouTube sources.
 - analyze_articles: ask Analyst to dedupe, score, check memory, and write candidate signals.
 - collect_more_context: ask Scout for more context on a topic when coverage is thin, duplicated, or one-sided.
-- critique_digest: ask Critic to score the proposed digest before finalizing. Use this after analyze_articles when the Critic is enabled. If the Critic returns weak signals with revision notes, prefer analyze_articles or collect_more_context next; do not finalize until the Critic approves or its rounds are exhausted.
+- critique_digest: ask Critic to score the proposed digest before finalizing. Use this after analyze_articles when the Critic is enabled. If the Critic returns weak signals with revision notes, do one round of analyze_articles or collect_more_context, then call critique_digest again. Once the Critic approves or critic_rounds has reached the max, call finalize_digest immediately.
 - finalize_digest: stop and publish the best ranked signals.
 
 Rules:
@@ -170,6 +170,11 @@ analyst_review_limit = 40
 analyst_review_batch_size = 1
 analyst_full_review = true
 executive_summary_limit = 12
+# Minimum signal score (0-100) the latest run must produce to refresh the
+# Intelligence Briefing on the Digest page. If no signal clears this floor,
+# the dashboard falls back to the previous run's briefing and shows a
+# "not enough new signal" note. Set to 0 to disable the floor.
+executive_summary_min_score = 45
 summary_mode = "short_expanded"
 visuals_mode = "image_icon"
 repeat_penalty_strength = "strong"

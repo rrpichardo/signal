@@ -49,8 +49,6 @@ export const api = {
     const query = qs.toString();
     return http<SignalsResponse>(`/api/signals${query ? `?${query}` : ""}`);
   },
-  // Top-N signals by score from the latest run (exec summary, no score_breakdown).
-  executiveSummary: () => http<Signal[]>("/api/signals/executive"),
   // Editor-generated briefing for the latest complete run. Null briefing when no Editor has run.
   executiveBriefing: () => http<ExecutiveBriefingResponse>("/api/executive-briefing"),
   // Single signal detail with full score_breakdown included.

@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 from .agent_runtime import AgentRuntimeError, SignalAgentRuntime
+from .env_loader import load_dotenv
 from .config import load_config
 from .dashboard import serve_dashboard
 from .llm import BrainClient
@@ -74,6 +75,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     command = args.command or "agent"
     config_path = args.config or "configs/ai_tech.toml"
+    load_dotenv(config_path)  # no-op if keys are already exported
     config = load_config(config_path)
 
     if command == "agent":
