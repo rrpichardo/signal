@@ -136,6 +136,9 @@ class SignalStorage:
             _ensure_column(conn, "signals", "icon_key", "text")
             _ensure_column(conn, "signals", "scout_note", "text")
             _ensure_column(conn, "signals", "relevance_label", "text")
+            # Phase 4: per-signal analyst artifact (mechanism, key_actors, evidence, confidence, truncation meta).
+            # Written post-hoc by the Editor fallback; NULL on signals from older runs.
+            _ensure_column(conn, "signals", "analyst_artifact_json", "text")
 
     def save_run(self, articles: list[Article], signals: list[Signal], cluster_count: int, output_path: str, started_at: str) -> None:
         completed_at = utc_now_iso()
@@ -411,7 +414,7 @@ class SignalStorage:
                 """
                 select id, title, score, urgency, event_type, source, published_at, summary, short_summary,
                        expanded_summary, why_it_matters, url, score_breakdown_json, entities_json, image_url,
-                       icon_key, scout_note, relevance_label, created_at
+                       icon_key, scout_note, relevance_label, analyst_artifact_json, created_at
                 from signals
                 order by created_at desc, score desc
                 limit ?
@@ -452,7 +455,7 @@ class SignalStorage:
         query = """
             select id, title, score, urgency, event_type, source, published_at, summary, short_summary,
                    expanded_summary, why_it_matters, url, score_breakdown_json, entities_json, image_url,
-                   icon_key, scout_note, relevance_label, created_at
+                   icon_key, scout_note, relevance_label, analyst_artifact_json, created_at
             from signals
         """
         params: list[Any] = []
@@ -481,7 +484,7 @@ class SignalStorage:
                 """
                 select id, title, score, urgency, event_type, source, published_at, summary, short_summary,
                        expanded_summary, why_it_matters, url, score_breakdown_json, entities_json, image_url,
-                       icon_key, scout_note, relevance_label, created_at
+                       icon_key, scout_note, relevance_label, analyst_artifact_json, created_at
                 from signals where id = ?
                 """,
                 (signal_id,),
@@ -502,7 +505,7 @@ class SignalStorage:
         query = """
             select id, title, score, urgency, event_type, source, published_at, summary, short_summary,
                    expanded_summary, why_it_matters, url, score_breakdown_json, entities_json, image_url,
-                   icon_key, scout_note, relevance_label, created_at
+                   icon_key, scout_note, relevance_label, analyst_artifact_json, created_at
             from signals
         """
         params: list[Any] = []
@@ -553,6 +556,12 @@ class SignalStorage:
             item["entities"] = json.loads(item.pop("entities_json") or "{}")
         except json.JSONDecodeError:
             item["entities"] = {}
+        # analyst_artifact_json is NULL on signals from older runs — always parse safely.
+        raw_artifact = item.pop("analyst_artifact_json", None)
+        try:
+            item["analyst_artifact"] = json.loads(raw_artifact) if raw_artifact else None
+        except json.JSONDecodeError:
+            item["analyst_artifact"] = None
         item["short_summary"] = item.get("short_summary") or item.get("summary") or ""
         item["expanded_summary"] = item.get("expanded_summary") or item.get("short_summary") or ""
         item["icon_key"] = item.get("icon_key") or item.get("event_type") or "signal"
@@ -560,6 +569,45 @@ class SignalStorage:
         item["scout_note"] = item.get("scout_note") or ""
         item["relevance_label"] = item.get("relevance_label") or "keep"
         return item
+
+    def update_signal_artifact(self, signal_id: str, artifact: dict[str, Any]) -> None:
+        """Persist a refreshed analyst artifact for one signal.
+
+        Called by the Editor fallback after it re-fetches and re-reviews a signal.
+        Does NOT touch other signal fields — only analyst_artifact_json is updated.
+        """
+        with self.connect() as conn:
+            conn.execute(
+                "update signals set analyst_artifact_json = ? where id = ?",
+                (json.dumps(artifact, sort_keys=True), signal_id),
+            )
+
+    def get_signal_artifacts(self, signal_ids: list[str]) -> dict[str, dict[str, Any] | None]:
+        """Load analyst_artifact_json for a batch of signal IDs.
+
+        Returns a mapping of signal_id -> parsed artifact dict (or None when absent).
+        Used by the Editor fallback to check which signals need re-fetching.
+        """
+        if not signal_ids:
+            return {}
+        placeholders = ",".join("?" * len(signal_ids))
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"select id, analyst_artifact_json from signals where id in ({placeholders})",
+                signal_ids,
+            ).fetchall()
+        result: dict[str, dict[str, Any] | None] = {}
+        for row in rows:
+            raw = row["analyst_artifact_json"]
+            try:
+                result[row["id"]] = json.loads(raw) if raw else None
+            except json.JSONDecodeError:
+                result[row["id"]] = None
+        # Fill in None for any IDs not found in the DB
+        for sid in signal_ids:
+            if sid not in result:
+                result[sid] = None
+        return result
 
     def load_priority_adjustments(self) -> dict[str, float]:
         with self.connect() as conn:

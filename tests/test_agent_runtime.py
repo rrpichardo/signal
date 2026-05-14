@@ -4,9 +4,12 @@ from pathlib import Path
 import tempfile
 import textwrap
 import unittest
+from unittest.mock import patch
 
 from signal_stream.agent_runtime import SignalAgentRuntime
 from signal_stream.config import load_config
+from signal_stream.editor_tools import evaluate_fallback_eligibility, run_fulltext_fallback
+from signal_stream.models import Signal, stable_id, utc_now_iso
 from signal_stream.storage import SignalStorage
 
 
@@ -91,6 +94,71 @@ class AgentRuntimeTest(unittest.TestCase):
             self.assertTrue(any(call["agent"] == "Scout" for call in tools))
             self.assertTrue(any(call["agent"] == "Analyst" for call in tools))
             self.assertGreaterEqual(len(memory), 3)
+
+
+class EditorFallbackCursorRegressionTest(unittest.TestCase):
+    """Regression tests: fallback failures must never block run completion.
+
+    Phase 4 contract: run_fulltext_fallback is best-effort. Every fetch or
+    Groq call failure is caught internally. The calling code (Phase 3 Editor)
+    therefore cannot have its run stalled by any fallback error path.
+    """
+
+    def _make_signal(self, signal_id: str, score: int = 60) -> Signal:
+        return Signal(
+            id=signal_id,
+            cluster_id=f"cluster-{signal_id}",
+            article_id=f"art-{signal_id}",
+            title=f"Article {signal_id}",
+            url="https://example.com/article",
+            source="Test",
+            published_at="2025-01-01T00:00:00Z",
+            score=score,
+            urgency="medium",
+            event_type="general_signal",
+            summary="Test.",
+            why_it_matters="",
+            next_steps=[],
+            matched_priorities=[],
+            entities={},
+        )
+
+    def test_all_fallback_fetches_fail_run_completes(self) -> None:
+        """run_fulltext_fallback returns without exception when all fetches yield empty body."""
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = SignalStorage(Path(tmp) / "test.db")
+            storage.init()
+            signals = [self._make_signal(f"s{i}") for i in range(3)]
+            artifacts: dict = {}
+
+            from unittest.mock import MagicMock
+            brain = MagicMock()
+            brain.last_error = ""
+
+            with patch("signal_stream.editor_tools.fetch_full_article_page", return_value=("", None)):
+                # Must complete without raising — this is what lets the run cursor advance
+                result = run_fulltext_fallback(
+                    signals=signals,
+                    artifacts=artifacts,
+                    brain=brain,
+                    storage=storage,
+                    cap=3,
+                    analyst_prompt="test",
+                )
+
+            # All failed → all None, no Groq calls attempted
+            for sig in signals:
+                self.assertIsNone(result[sig.id])
+            brain.chat_json.assert_not_called()
+
+    def test_evaluate_fallback_returns_subset_within_cap(self) -> None:
+        """evaluate_fallback_eligibility never returns more than cap, regardless of eligible count."""
+        signals = [self._make_signal(f"s{i}", score=60 - i) for i in range(10)]
+        artifacts: dict = {}  # all missing → all eligible
+
+        for cap in [0, 1, 3, 5]:
+            result = evaluate_fallback_eligibility(signals, artifacts, cap=cap)
+            self.assertLessEqual(len(result), cap, f"Cap={cap} produced {len(result)} results")
 
 
 if __name__ == "__main__":
