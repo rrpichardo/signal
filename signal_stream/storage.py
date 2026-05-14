@@ -251,6 +251,10 @@ class SignalStorage:
         started_at: str,
         run_id: str,
         summary: dict[str, Any] | None = None,
+        *,
+        briefing_json: str | None = None,
+        briefing_status: str | None = None,
+        briefing_error: str | None = None,
     ) -> None:
         """Persist a successful run as one atomic transaction.
 
@@ -360,8 +364,9 @@ class SignalStorage:
             # — this is the contract the cursor depends on. If anything above
             # raised, this update never lands and the cursor stays put.
             conn.execute(
-                "update agent_runs set status = ?, completed_at = ?, summary_json = ? where id = ?",
-                ("complete", completed_at, summary_json, run_id),
+                "update agent_runs set status = ?, completed_at = ?, summary_json = ?, "
+                "briefing_json = ?, briefing_status = ?, briefing_error = ? where id = ?",
+                ("complete", completed_at, summary_json, briefing_json, briefing_status, briefing_error, run_id),
             )
 
     def latest_complete_agent_run_started_at(self) -> str | None:
