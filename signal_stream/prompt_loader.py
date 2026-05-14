@@ -88,6 +88,10 @@ DEFAULT_BEHAVIOR_SETTINGS: dict[str, Any] = {
     "analyst_review_batch_size": 1,
     "analyst_full_review": True,
     "executive_summary_limit": 12,
+    # Minimum score a signal must clear (0-100) for the latest run to refresh
+    # the Briefing. If no signal in the latest run clears this floor, the
+    # Briefing falls back to the most recent prior run, tagged as stale.
+    "executive_summary_min_score": 45,
     # Critic-loop defaults: opt-in. Existing runs keep the old three-agent shape.
     "enable_critic": True,
     "max_critic_rounds": 1,
@@ -174,6 +178,12 @@ def load_behavior_settings(path: str | Path | None) -> dict[str, Any]:
     if "executive_summary_limit" in behavior:
         try:
             settings["executive_summary_limit"] = max(1, min(100, int(behavior["executive_summary_limit"])))
+        except (TypeError, ValueError):
+            pass
+    if "executive_summary_min_score" in behavior:
+        # Bounded 0-100. At 0, the floor is effectively off (any signal qualifies).
+        try:
+            settings["executive_summary_min_score"] = max(0, min(100, int(behavior["executive_summary_min_score"])))
         except (TypeError, ValueError):
             pass
     # Critic-loop switches: bool toggle and two bounded integers.

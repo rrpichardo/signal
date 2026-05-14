@@ -170,6 +170,11 @@ analyst_review_limit = 40
 analyst_review_batch_size = 1
 analyst_full_review = true
 executive_summary_limit = 12
+# Minimum signal score (0-100) the latest run must produce to refresh the
+# Intelligence Briefing on the Digest page. If no signal clears this floor,
+# the dashboard falls back to the previous run's briefing and shows a
+# "not enough new signal" note. Set to 0 to disable the floor.
+executive_summary_min_score = 45
 summary_mode = "short_expanded"
 visuals_mode = "image_icon"
 repeat_penalty_strength = "strong"

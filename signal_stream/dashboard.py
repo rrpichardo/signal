@@ -272,10 +272,17 @@ def _handler(storage: SignalStorage, config: SignalConfig, config_path: str = "c
                 self._json(storage.tool_calls(run.get("id"), limit=250) if run else [])
                 return
             if path == "/api/executive-briefing":
-                # Returns the Editor-generated briefing for the latest complete run.
-                # Frontend uses this for the BriefingBlock above the exec summary list.
-                # Falls back gracefully when no briefing exists (status="skipped").
-                self._json(storage.get_latest_briefing())
+                # Returns the Editor-generated briefing. When the latest run's
+                # strongest signal doesn't clear executive_summary_min_score,
+                # storage walks back to the most recent qualifying prior run
+                # and tags the response stale=true so the UI can render a
+                # "showing previous briefing" note.
+                behavior = load_brain_file(config.agent.brain_file).get("behavior") or {}
+                try:
+                    min_score = max(0, min(100, int(behavior.get("executive_summary_min_score", 45))))
+                except (TypeError, ValueError):
+                    min_score = 45
+                self._json(storage.get_latest_briefing(min_signal_score=min_score))
                 return
             if path == "/api/signals/executive":
                 # Top N signals by score from the latest complete run.
