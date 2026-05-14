@@ -269,6 +269,12 @@ def _handler(storage: SignalStorage, config: SignalConfig, config_path: str = "c
                 run = storage.latest_agent_run() or {}
                 self._json(storage.tool_calls(run.get("id"), limit=250) if run else [])
                 return
+            if path == "/api/executive-briefing":
+                # Returns the Editor-generated briefing for the latest complete run.
+                # Frontend uses this for the BriefingBlock above the exec summary list.
+                # Falls back gracefully when no briefing exists (status="skipped").
+                self._json(storage.get_latest_briefing())
+                return
             if path == "/api/signals/executive":
                 # Top N signals by score from the latest complete run.
                 # Drives the executive summary block at the top of the digest page.

@@ -45,6 +45,16 @@ export function useExecutiveSummary() {
   });
 }
 
+// Editor-generated briefing for the latest complete run.
+// Falls back to null briefing when no Editor has run (status="skipped").
+export function useExecutiveBriefing() {
+  return useQuery({
+    queryKey: ["executive-briefing"],
+    queryFn: api.executiveBriefing,
+    refetchInterval: LIVE_INTERVAL,
+  });
+}
+
 // Display preferences (page_size, default_scope) editable in Settings.
 // Cached without polling — these only change when the user saves.
 export function useDisplaySettings() {

@@ -10,6 +10,7 @@ import { RelatedSignalsRail } from "@/components/signals/RelatedSignalsRail";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Separator } from "@/components/ui/separator";
 import { ArrowLeft } from "lucide-react";
+import type { AnalystArtifact } from "@/lib/types";
 
 // Signal detail — full reader layout, max-w-3xl body width.
 export default function SignalDetailPage() {
@@ -70,10 +71,16 @@ export default function SignalDetailPage() {
 
       <Byline source={signal.source} publishedAt={signal.published_at} url={signal.url} />
 
-      {/* Hero image if present. */}
+      {/* Hero image if present. Container hides itself on broken images. */}
       {signal.image_url && (
         <div className="mt-6 overflow-hidden rounded-md border border-border bg-muted">
-          <img src={signal.image_url} alt="" loading="lazy" className="aspect-[16/9] w-full object-cover" />
+          <img
+            src={signal.image_url}
+            alt=""
+            loading="lazy"
+            className="aspect-[16/9] w-full object-cover"
+            onError={(e) => e.currentTarget.parentElement?.classList.add("hidden")}
+          />
         </div>
       )}
 
@@ -107,6 +114,11 @@ export default function SignalDetailPage() {
         <ScoreBreakdownPanel score={signal.score} breakdown={signal.score_breakdown ?? []} />
       </div>
 
+      {/* Analyst artifact — only present on new runs (Phase 2+). Omitted for old signals. */}
+      {signal.analyst_artifact && (
+        <ArtifactPanel artifact={signal.analyst_artifact} />
+      )}
+
       {/* Entities panel. */}
       {Object.keys(signal.entities ?? {}).length > 0 && (
         <div className="mb-10">
@@ -121,6 +133,96 @@ export default function SignalDetailPage() {
           <Separator className="my-8" />
           <RelatedSignalsRail signals={related} />
         </>
+      )}
+    </div>
+  );
+}
+
+// Confidence badge colors: high = green-ish, medium = muted blue, low = amber.
+const CONFIDENCE_STYLE: Record<string, string> = {
+  high: "bg-emerald-500/10 text-emerald-600 border-emerald-500/30",
+  medium: "bg-blue-500/10 text-blue-500 border-blue-500/30",
+  low: "bg-amber-500/10 text-amber-600 border-amber-500/30",
+};
+
+// Renders the per-signal analyst artifact below the score breakdown.
+// All fields are optional — if a section has no data it's simply omitted.
+function ArtifactPanel({ artifact }: { artifact: AnalystArtifact }) {
+  const confidence = artifact.confidence;
+  const wasTruncated = artifact._meta?.was_truncated;
+
+  return (
+    <div className="mb-8 space-y-5 rounded-md border border-border bg-muted/20 p-5">
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="kicker">Analyst report</div>
+        {confidence && (
+          <span className={`inline-flex items-center rounded-full border px-2 py-0.5 font-mono text-xs ${CONFIDENCE_STYLE[confidence] ?? ""}`}>
+            {confidence} confidence
+          </span>
+        )}
+        {wasTruncated && (
+          <span className="inline-flex items-center rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 font-mono text-xs text-amber-600">
+            truncated
+          </span>
+        )}
+      </div>
+
+      {/* Mechanism — the core causal explanation */}
+      {artifact.mechanism && (
+        <div>
+          <div className="kicker mb-1">Mechanism</div>
+          <p className="text-body text-foreground/85">{artifact.mechanism}</p>
+        </div>
+      )}
+
+      {/* Key actors */}
+      {artifact.key_actors && artifact.key_actors.length > 0 && (
+        <div>
+          <div className="kicker mb-2">Key actors</div>
+          <ul className="flex flex-wrap gap-2">
+            {artifact.key_actors.map((actor, i) => (
+              <li key={i} className="rounded-full border border-border bg-background px-3 py-1 text-ui">
+                <span className="font-medium">{actor.name}</span>
+                {actor.role && <span className="ml-1 text-muted-foreground">· {actor.role}</span>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Affected parties */}
+      {artifact.affected_parties && artifact.affected_parties.length > 0 && (
+        <div>
+          <div className="kicker mb-2">Affected parties</div>
+          <ul className="flex flex-wrap gap-2">
+            {artifact.affected_parties.map((party, i) => (
+              <li key={i} className="rounded-full border border-border bg-background px-3 py-1 text-ui text-muted-foreground">
+                {party}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Evidence excerpts */}
+      {artifact.evidence_excerpts && artifact.evidence_excerpts.length > 0 && (
+        <div>
+          <div className="kicker mb-2">Evidence</div>
+          <ul className="space-y-3">
+            {artifact.evidence_excerpts.map((ex, i) => (
+              <li key={i}>
+                <blockquote className="border-l-2 border-border pl-4 font-serif text-body italic text-foreground/75">
+                  {ex.quote}
+                </blockquote>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Confidence rationale — only when model provided a reason */}
+      {artifact.confidence_reason && (
+        <p className="text-meta text-muted-foreground">{artifact.confidence_reason}</p>
       )}
     </div>
   );

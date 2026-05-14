@@ -136,11 +136,12 @@ class SignalStorage:
             _ensure_column(conn, "signals", "icon_key", "text")
             _ensure_column(conn, "signals", "scout_note", "text")
             _ensure_column(conn, "signals", "relevance_label", "text")
-            # Phase 2: per-signal artifact blob (mechanism, key_actors, evidence,
-            # confidence, truncation metadata). Opaque JSON — matches the existing
-            # score_breakdown_json / matched_priorities_json pattern. Old rows have
-            # null; _hydrate_signal_row tolerates it.
+            # Per-signal analyst artifact (mechanism, key_actors, evidence, confidence, truncation meta).
             _ensure_column(conn, "signals", "analyst_artifact_json", "text")
+            # Editor briefing columns on agent_runs.
+            _ensure_column(conn, "agent_runs", "briefing_json", "text")
+            _ensure_column(conn, "agent_runs", "briefing_status", "text")
+            _ensure_column(conn, "agent_runs", "briefing_error", "text")
 
     def save_run(self, articles: list[Article], signals: list[Signal], cluster_count: int, output_path: str, started_at: str) -> None:
         completed_at = utc_now_iso()
@@ -487,7 +488,7 @@ class SignalStorage:
         }
 
     def get_signal(self, signal_id: str) -> dict[str, Any] | None:
-        """Return a single signal by ID with the full score_breakdown included."""
+        """Return a single signal by ID with score_breakdown and analyst_artifact included."""
         with self.connect() as conn:
             row = conn.execute(
                 """
@@ -549,6 +550,33 @@ class SignalStorage:
             "output_path": summary.get("output_path", ""),
         }
 
+    def get_latest_briefing(self) -> dict[str, Any]:
+        """Return the executive briefing for the most recent complete run.
+
+        Returns a dict with briefing, briefing_status, generated_at,
+        source_signal_ids, and run_id. When no complete run exists or the run
+        has no briefing yet, briefing is null and status is 'skipped'.
+        """
+        with self.connect() as conn:
+            row = conn.execute(
+                "select id, briefing_json, briefing_status, briefing_error "
+                "from agent_runs where status = 'complete' "
+                "order by started_at desc, completed_at desc, id desc limit 1"
+            ).fetchone()
+        if not row:
+            return {"briefing": None, "briefing_status": "skipped", "generated_at": None, "source_signal_ids": [], "run_id": None}
+        try:
+            briefing = json.loads(row["briefing_json"] or "null")
+        except json.JSONDecodeError:
+            briefing = None
+        return {
+            "briefing": briefing,
+            "briefing_status": row["briefing_status"] or "skipped",
+            "generated_at": briefing.get("generated_at") if briefing else None,
+            "source_signal_ids": briefing.get("source_signal_ids", []) if briefing else [],
+            "run_id": row["id"],
+        }
+
     def _hydrate_signal_row(self, row: Any, *, slim: bool = False) -> dict[str, Any]:
         # Shared post-processing for signal rows: parse JSON fields and apply UI fallbacks.
         # slim=True omits score_breakdown — used by the list endpoint to reduce payload size.
@@ -565,17 +593,14 @@ class SignalStorage:
             item["entities"] = json.loads(item.pop("entities_json") or "{}")
         except json.JSONDecodeError:
             item["entities"] = {}
-        # Phase 2: parse the analyst artifact blob. Old rows or rows where the
-        # model review didn't populate it come back as null — _hydrate keeps
-        # the key in the dict so the API contract is consistent.
-        raw_artifact = item.pop("analyst_artifact_json", None)
-        if raw_artifact:
+        # analyst_artifact_json is only selected by get_signal (detail endpoint).
+        # Parse it when present; old signals without the column return null.
+        if "analyst_artifact_json" in item:
             try:
-                item["analyst_artifact"] = json.loads(raw_artifact)
+                item["analyst_artifact"] = json.loads(item.pop("analyst_artifact_json") or "null")
             except json.JSONDecodeError:
+                item.pop("analyst_artifact_json", None)
                 item["analyst_artifact"] = None
-        else:
-            item["analyst_artifact"] = None
         item["short_summary"] = item.get("short_summary") or item.get("summary") or ""
         item["expanded_summary"] = item.get("expanded_summary") or item.get("short_summary") or ""
         item["icon_key"] = item.get("icon_key") or item.get("event_type") or "signal"
@@ -583,6 +608,45 @@ class SignalStorage:
         item["scout_note"] = item.get("scout_note") or ""
         item["relevance_label"] = item.get("relevance_label") or "keep"
         return item
+
+    def update_signal_artifact(self, signal_id: str, artifact: dict[str, Any]) -> None:
+        """Persist a refreshed analyst artifact for one signal.
+
+        Called by the Editor fallback after it re-fetches and re-reviews a signal.
+        Does NOT touch other signal fields — only analyst_artifact_json is updated.
+        """
+        with self.connect() as conn:
+            conn.execute(
+                "update signals set analyst_artifact_json = ? where id = ?",
+                (json.dumps(artifact, sort_keys=True), signal_id),
+            )
+
+    def get_signal_artifacts(self, signal_ids: list[str]) -> dict[str, dict[str, Any] | None]:
+        """Load analyst_artifact_json for a batch of signal IDs.
+
+        Returns a mapping of signal_id -> parsed artifact dict (or None when absent).
+        Used by the Editor fallback to check which signals need re-fetching.
+        """
+        if not signal_ids:
+            return {}
+        placeholders = ",".join("?" * len(signal_ids))
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"select id, analyst_artifact_json from signals where id in ({placeholders})",
+                signal_ids,
+            ).fetchall()
+        result: dict[str, dict[str, Any] | None] = {}
+        for row in rows:
+            raw = row["analyst_artifact_json"]
+            try:
+                result[row["id"]] = json.loads(raw) if raw else None
+            except json.JSONDecodeError:
+                result[row["id"]] = None
+        # Fill in None for any IDs not found in the DB
+        for sid in signal_ids:
+            if sid not in result:
+                result[sid] = None
+        return result
 
     def load_priority_adjustments(self) -> dict[str, float]:
         with self.connect() as conn:
