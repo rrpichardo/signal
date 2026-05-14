@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 from .agent_runtime import AgentRuntimeError, SignalAgentRuntime
@@ -22,6 +23,35 @@ def _explain_brain_error(err: str) -> str:
     if "timeout" in msg or "timed out" in msg:
         return f"Network timeout. Check internet connection. ({err})"
     return err
+
+
+def _load_dotenv(config_path: str) -> None:
+    """Load a .env file into os.environ if keys aren't already set.
+
+    Searches CWD first, then the directory containing the config file.
+    Skips variables that are already in the environment so an explicit
+    export always wins over the file.
+    """
+    candidates = [
+        Path.cwd() / ".env",
+        Path(config_path).parent.parent / ".env",  # configs/../.env
+    ]
+    for dotenv in candidates:
+        if not dotenv.is_file():
+            continue
+        for raw in dotenv.read_text().splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            line = line.removeprefix("export").strip()
+            if "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip()
+            val = val.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = val
+        return  # stop after first .env found
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -74,6 +104,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     command = args.command or "agent"
     config_path = args.config or "configs/ai_tech.toml"
+    _load_dotenv(config_path)  # no-op if keys are already exported
     config = load_config(config_path)
 
     if command == "agent":
