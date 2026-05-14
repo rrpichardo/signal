@@ -7,6 +7,7 @@ import type {
   AgentRun,
   BrainSettings,
   DisplaySettings,
+  ExecutiveBriefingResponse,
   MemoryItem,
   Signal,
   SignalsResponse,
@@ -50,6 +51,8 @@ export const api = {
   },
   // Top-N signals by score from the latest run (exec summary, no score_breakdown).
   executiveSummary: () => http<Signal[]>("/api/signals/executive"),
+  // Editor-generated briefing for the latest complete run. Null briefing when no Editor has run.
+  executiveBriefing: () => http<ExecutiveBriefingResponse>("/api/executive-briefing"),
   // Single signal detail with full score_breakdown included.
   signalById: (id: string) => http<Signal>(`/api/signals/${encodeURIComponent(id)}`),
   memory: () => http<MemoryItem[]>("/api/memory"),

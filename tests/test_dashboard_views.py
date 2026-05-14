@@ -123,6 +123,145 @@ def test_executive_summary_endpoint_returns_top_12():
 # test_settings_save_validates_component_weights_sum_100
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# test_executive_briefing_no_runs_returns_skipped
+# ---------------------------------------------------------------------------
+
+def test_executive_briefing_no_runs_returns_skipped():
+    """get_latest_briefing returns status='skipped' and null briefing when DB has no complete runs."""
+    store = _make_storage()
+
+    result = store.get_latest_briefing()
+
+    assert result["briefing"] is None
+    assert result["briefing_status"] == "skipped"
+    assert result["generated_at"] is None
+    assert result["source_signal_ids"] == []
+    assert result["run_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# test_executive_briefing_returns_briefing_when_present
+# ---------------------------------------------------------------------------
+
+def test_executive_briefing_returns_briefing_when_present():
+    """get_latest_briefing returns the briefing_json parsed from the latest complete run."""
+    store = _make_storage()
+    run_id = store.start_agent_run("test run")
+    briefing_payload = {
+        "headline": "AI Week in Review",
+        "briefing_paragraphs": ["Para one.", "Para two."],
+        "key_themes": [{"label": "Theme A", "signal_ids": [], "summary": "About theme A."}],
+        "watch_items": ["Watch item 1"],
+        "source_signal_ids": ["sig-1", "sig-2"],
+        "input_artifact_count": 2,
+        "artifact_coverage": {"with_artifact": 2, "missing": 0, "thin": 0},
+        "any_artifact_truncated": False,
+        "generated_at": "2026-01-01T12:00:00Z",
+    }
+    # Manually write briefing_json + briefing_status to simulate an Editor run.
+    with store.connect() as conn:
+        conn.execute(
+            "update agent_runs set status = 'complete', completed_at = ?, briefing_json = ?, briefing_status = ? where id = ?",
+            (
+                "2026-01-01T12:00:00Z",
+                json.dumps(briefing_payload),
+                "generated",
+                run_id,
+            ),
+        )
+
+    result = store.get_latest_briefing()
+
+    assert result["briefing_status"] == "generated"
+    assert result["briefing"] is not None
+    assert result["briefing"]["headline"] == "AI Week in Review"
+    assert result["generated_at"] == "2026-01-01T12:00:00Z"
+    assert result["source_signal_ids"] == ["sig-1", "sig-2"]
+    assert result["run_id"] == run_id
+
+
+# ---------------------------------------------------------------------------
+# test_executive_briefing_missing_column_old_db
+# ---------------------------------------------------------------------------
+
+def test_executive_briefing_missing_column_old_db():
+    """get_latest_briefing must not 500 when briefing_json column is absent (old DB).
+
+    _ensure_column adds it on init(), so after init() the column always exists.
+    This test verifies the column was added and a null briefing row hydrates cleanly.
+    """
+    store = _make_storage()
+    run_id = store.start_agent_run("test old run")
+    # Flip to complete but leave briefing_json as NULL (simulates an old run pre-Phase 3).
+    with store.connect() as conn:
+        conn.execute(
+            "update agent_runs set status = 'complete', completed_at = ? where id = ?",
+            ("2026-01-01T12:00:00Z", run_id),
+        )
+
+    result = store.get_latest_briefing()
+
+    # Should return skipped/null gracefully, not raise.
+    assert result["briefing"] is None
+    assert result["briefing_status"] == "skipped"
+    assert result["run_id"] == run_id
+
+
+# ---------------------------------------------------------------------------
+# test_analyst_artifact_included_in_get_signal
+# ---------------------------------------------------------------------------
+
+def test_analyst_artifact_included_in_get_signal():
+    """get_signal (detail endpoint) must include parsed analyst_artifact when present."""
+    store = _make_storage()
+    _insert_signal(store, signal_id="sig-artifact", score=80)
+    artifact = {
+        "mechanism": "Groq cut latency by caching model weights on DRAM.",
+        "key_actors": [{"name": "Groq", "role": "chip designer"}],
+        "confidence": "high",
+        "confidence_reason": "Multiple corroborating sources.",
+        "_meta": {"was_truncated": False, "chars_total": 5000, "chars_sent": 5000},
+    }
+    with store.connect() as conn:
+        conn.execute(
+            "update signals set analyst_artifact_json = ? where id = ?",
+            (json.dumps(artifact), "sig-artifact"),
+        )
+
+    signal = store.get_signal("sig-artifact")
+
+    assert signal is not None
+    assert "analyst_artifact" in signal
+    art = signal["analyst_artifact"]
+    assert art is not None
+    assert art["mechanism"].startswith("Groq")
+    assert art["confidence"] == "high"
+    assert art["_meta"]["was_truncated"] is False
+
+
+# ---------------------------------------------------------------------------
+# test_old_signal_without_artifact_returns_null
+# ---------------------------------------------------------------------------
+
+def test_old_signal_without_artifact_returns_null():
+    """get_signal must return analyst_artifact: null for signals that predate Phase 2."""
+    store = _make_storage()
+    _insert_signal(store, signal_id="sig-old", score=60)
+    # Leave analyst_artifact_json as NULL (default for old rows).
+
+    signal = store.get_signal("sig-old")
+
+    assert signal is not None
+    # Key is present, value is None — frontend checks for null, not key absence.
+    assert "analyst_artifact" in signal
+    assert signal["analyst_artifact"] is None
+
+
+# ---------------------------------------------------------------------------
+# test_settings_save_validates_component_weights_sum_100
+# ---------------------------------------------------------------------------
+
 def test_settings_save_validates_component_weights_sum_100():
     """save_brain_file must raise ValueError when component weights don't sum to 100."""
     with tempfile.TemporaryDirectory() as tmpdir:
