@@ -125,6 +125,18 @@ export default function DigestPage() {
         <BriefingBlock briefing={briefingData.briefing} status={briefingData.briefing_status} />
       )}
 
+      {/* Missing-briefing hint — shown when the latest run has no briefing
+          (status is pending / failed / skipped, or the column is NULL for
+          pre-Phase-3 runs). Tells the reader the feature exists but didn't
+          produce output this run, instead of silently hiding. */}
+      {scope === "latest" && page === 1 && briefingData &&
+       briefingData.briefing_status !== "generated" &&
+       briefingData.briefing_status !== "partial" && (
+        <div className="mb-8 rounded-md border border-dashed border-border bg-muted/10 px-4 py-3 text-meta text-muted-foreground">
+          Intelligence briefing not generated for this run — re-run the agent to produce one.
+        </div>
+      )}
+
       {/* Executive summary — top 12 signals at a glance. Only shown on page 1 of latest scope. */}
       {scope === "latest" && page === 1 && execSignals && execSignals.length > 0 && (
         <ExecSummaryBlock signals={execSignals} />

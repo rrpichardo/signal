@@ -283,6 +283,21 @@ class SignalAgentRuntime:
                             f"Article truncated for Groq review (signal {trunc.get('signal_id')}).",
                             trunc,
                         )
+                    # Safety net: if the Critic has exhausted its revision rounds and
+                    # the LLM keeps choosing analyze_articles instead of critique_digest,
+                    # ship the best signals now rather than burning iterations until
+                    # max_iterations triggers an "interrupted" status.
+                    if (
+                        state["critic_rounds"] >= self.config.agent.max_critic_rounds
+                        and state.get("analysis", {}).get("signals")
+                    ):
+                        self.storage.save_agent_event(
+                            run_id, "Orchestrator", "observation",
+                            "Critic rounds exhausted after re-analysis; finalizing.",
+                            {"critic_rounds": state["critic_rounds"]},
+                        )
+                        state["finalized"] = True
+                        break
                 elif decision.action == "critique_digest":
                     # Step 2d: Critic reviews the Analyst's ranked signals before
                     # the Orchestrator decides to ship. If the score is below the
