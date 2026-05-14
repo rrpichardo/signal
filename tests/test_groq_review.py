@@ -206,7 +206,8 @@ class TestOversizedArticleTruncatedWithWarning(unittest.TestCase):
         })
 
         with patch.object(sys, "stderr", captured):
-            result = _chat_json_with_truncation_fallback(
+            # Phase 2: returns (result, truncation_info) tuple.
+            result, trunc_info = _chat_json_with_truncation_fallback(
                 mock_llm, "sys", payload, {}, required_fields=["score", "short_summary", "expanded_summary"]
             )
 
@@ -217,6 +218,10 @@ class TestOversizedArticleTruncatedWithWarning(unittest.TestCase):
         for item in retry_payload.get("signals", []):
             self.assertLessEqual(len(str(item.get("article_text", ""))), _OVERSIZED_TRUNCATION)
         self.assertIsNotNone(result)
+        # Truncation info should carry the post-truncation char count.
+        self.assertTrue(trunc_info["was_truncated"])
+        self.assertEqual(trunc_info["chars_total"], 20000)
+        self.assertLessEqual(trunc_info["chars_sent"], _OVERSIZED_TRUNCATION)
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +378,248 @@ class TestFetchFullArticlePageFallback(unittest.TestCase):
 
         self.assertGreaterEqual(len(body), 200)
         self.assertIn("Good article content", body)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: artifact assembly + confidence overrides
+# ---------------------------------------------------------------------------
+
+class TestArtifactPersistedOnSignal(unittest.TestCase):
+    def test_artifact_persisted_on_signal(self) -> None:
+        """After a model review pass, signal.analyst_artifact is populated."""
+        from signal_stream.analysis_tools import _apply_analyst_mode
+        from signal_stream.models import BrainConfig, Priority
+
+        class FakeBrain:
+            def __init__(self, config):  # noqa: ANN001
+                pass
+
+            def available(self) -> bool:
+                return True
+
+            def chat_json(self, system, user, schema=None, **kwargs):  # noqa: ANN001
+                return {
+                    "signals": [{
+                        "id": "sig_artifact",
+                        "score": 70,
+                        "short_summary": "A model-written card summary that explains why this matters now.",
+                        "expanded_summary": "Expanded paragraph describing the change and its forward-looking implications.",
+                        "entities": {"companies": ["Anthropic"]},
+                        "mechanism": "Anthropic raised its rate-limit ceiling, unblocking agent workloads that previously needed throttling.",
+                        "key_actors": [{"name": "Anthropic", "role": "API provider"}],
+                        "affected_parties": ["AI infrastructure teams", "Agent-framework builders"],
+                        "evidence_excerpts": [{"quote": "We are raising the per-minute token cap by 10x.", "source_offset": 120}],
+                        "confidence": "high",
+                        "confidence_reason": "Primary-source announcement with specific numbers.",
+                    }]
+                }
+
+        config = SignalConfig(
+            name="Test", organization="Test", audience="Reader", mission="Test",
+            competitors=[], markets=[], priorities=[Priority("AI")], sources=[],
+            storage_path=":memory:", output_dir=".", brain=BrainConfig(),
+        )
+        signal = Signal(
+            id="sig_artifact", cluster_id="c", article_id="a",
+            title="Anthropic raises rate limit ceiling",
+            url="https://example.com", source="Example", published_at="",
+            score=60, urgency="medium", event_type="platform_shift",
+            summary="", why_it_matters="", next_steps=[],
+            matched_priorities=[], entities={}, duplicate_count=2,
+            short_summary="", expanded_summary="",
+        )
+
+        import signal_stream.analysis_tools as analysis_tools
+        original = analysis_tools.BrainClient
+        analysis_tools.BrainClient = FakeBrain
+        try:
+            updated_signals, _ = _apply_analyst_mode(
+                [signal], config, "hybrid", "prompt",
+                {"analyst_full_review": True, "summary_mode": "short_expanded", "entity_extraction": "hybrid"},
+                {"sig_artifact": {"article_text": "A" * 4000}},
+            )
+        finally:
+            analysis_tools.BrainClient = original
+
+        artifact = updated_signals[0].analyst_artifact
+        self.assertIsNotNone(artifact)
+        self.assertEqual(artifact["mechanism"][:9], "Anthropic")
+        self.assertEqual(artifact["key_actors"][0]["name"], "Anthropic")
+        self.assertEqual(artifact["affected_parties"][0], "AI infrastructure teams")
+        self.assertEqual(artifact["evidence_excerpts"][0]["source_offset"], 120)
+        # No truncation, multi-source — confidence should stay "high".
+        self.assertEqual(artifact["confidence"], "high")
+        self.assertEqual(artifact["model_confidence"], "high")
+        self.assertFalse(artifact["_meta"]["was_truncated"])
+        self.assertEqual(artifact["_meta"]["extraction_quality"], "good")
+
+
+class TestConfidenceDowngradedOnTruncation(unittest.TestCase):
+    def test_confidence_downgraded_on_heavy_truncation(self) -> None:
+        """If was_truncated and chars_sent / chars_total < 0.5, final confidence is 'low'."""
+        from signal_stream.analysis_tools import _build_artifact
+
+        signal = Signal(
+            id="s", cluster_id="c", article_id="a", title="T", url="", source="",
+            published_at="", score=60, urgency="medium", event_type="platform_shift",
+            summary="", why_it_matters="", next_steps=[], matched_priorities=[],
+            entities={}, duplicate_count=2,  # multi-source so single-source rule won't fire
+        )
+        item = {
+            "id": "s", "score": 60,
+            "short_summary": "x", "expanded_summary": "y", "entities": {},
+            "mechanism": "Some mechanism prose here.",
+            "key_actors": [{"name": "A", "role": "r"}],
+            "affected_parties": ["x"],
+            "evidence_excerpts": [{"quote": "q", "source_offset": 0}],
+            "confidence": "high",
+            "confidence_reason": "primary source",
+            # Heavy truncation: 4000 of 20000 chars sent (20% — well below 0.5).
+            "_truncation": {"was_truncated": True, "chars_total": 20000, "chars_sent": 4000},
+        }
+        artifact = _build_artifact(signal, item)
+        self.assertEqual(artifact["model_confidence"], "high")
+        self.assertEqual(artifact["confidence"], "low")
+        self.assertTrue(artifact["_meta"]["was_truncated"])
+        self.assertEqual(artifact["_meta"]["extraction_quality"], "poor")
+
+
+class TestConfidenceDowngradedOnSingleSource(unittest.TestCase):
+    def test_confidence_downgraded_on_single_source(self) -> None:
+        """duplicate_count == 0 forces final confidence to 'low' regardless of model call."""
+        from signal_stream.analysis_tools import _build_artifact
+
+        signal = Signal(
+            id="s", cluster_id="c", article_id="a", title="T", url="", source="",
+            published_at="", score=60, urgency="medium", event_type="platform_shift",
+            summary="", why_it_matters="", next_steps=[], matched_priorities=[],
+            entities={}, duplicate_count=0,  # single-source story
+        )
+        item = {
+            "id": "s", "score": 60,
+            "short_summary": "x", "expanded_summary": "y", "entities": {},
+            "mechanism": "Solid mechanism prose with enough detail.",
+            "key_actors": [{"name": "A", "role": "r"}],
+            "affected_parties": ["x"],
+            "evidence_excerpts": [{"quote": "q", "source_offset": 0}],
+            "confidence": "medium",
+            "confidence_reason": "secondary coverage",
+            # No truncation.
+            "_truncation": {"was_truncated": False, "chars_total": 5000, "chars_sent": 5000},
+        }
+        artifact = _build_artifact(signal, item)
+        self.assertEqual(artifact["model_confidence"], "medium")
+        self.assertEqual(artifact["confidence"], "low")
+
+
+class TestModelConfidenceKeptForTelemetry(unittest.TestCase):
+    def test_model_confidence_kept_for_telemetry(self) -> None:
+        """Model's self-reported confidence is preserved alongside the final value."""
+        from signal_stream.analysis_tools import _build_artifact
+
+        signal = Signal(
+            id="s", cluster_id="c", article_id="a", title="T", url="", source="",
+            published_at="", score=60, urgency="medium", event_type="platform_shift",
+            summary="", why_it_matters="", next_steps=[], matched_priorities=[],
+            entities={}, duplicate_count=0,  # forces downgrade
+        )
+        item = {
+            "id": "s", "score": 60,
+            "short_summary": "x", "expanded_summary": "y", "entities": {},
+            "mechanism": "Solid mechanism.",
+            "key_actors": [{"name": "A", "role": "r"}],
+            "affected_parties": ["x"],
+            "evidence_excerpts": [{"quote": "q", "source_offset": 0}],
+            "confidence": "high",
+            "confidence_reason": "primary source",
+            "_truncation": {"was_truncated": False, "chars_total": 5000, "chars_sent": 5000},
+        }
+        artifact = _build_artifact(signal, item)
+        # final confidence is downgraded by single-source rule
+        self.assertEqual(artifact["confidence"], "low")
+        # but the model's own call is kept for telemetry / future tuning
+        self.assertEqual(artifact["model_confidence"], "high")
+
+
+class TestArtifactWithMissingOptionalFields(unittest.TestCase):
+    def test_thin_artifact_is_marked_partial_or_poor(self) -> None:
+        """When the model omits optional fields, the artifact records missing_fields and adjusts extraction_quality."""
+        from signal_stream.analysis_tools import _build_artifact
+
+        signal = Signal(
+            id="s", cluster_id="c", article_id="a", title="T", url="", source="",
+            published_at="", score=60, urgency="medium", event_type="platform_shift",
+            summary="", why_it_matters="", next_steps=[], matched_priorities=[],
+            entities={}, duplicate_count=2,
+        )
+        # Model omitted all four optional structured fields.
+        item = {
+            "id": "s", "score": 60,
+            "short_summary": "x", "expanded_summary": "y", "entities": {},
+            "confidence": "medium",
+            "_truncation": {"was_truncated": False, "chars_total": 5000, "chars_sent": 5000},
+        }
+        artifact = _build_artifact(signal, item)
+        self.assertEqual(artifact["mechanism"], "")
+        self.assertEqual(artifact["key_actors"], [])
+        self.assertEqual(artifact["affected_parties"], [])
+        self.assertEqual(artifact["evidence_excerpts"], [])
+        self.assertEqual(set(artifact["_meta"]["missing_fields"]), {"mechanism", "key_actors", "affected_parties", "evidence_excerpts"})
+        # 4 missing → poor extraction_quality
+        self.assertEqual(artifact["_meta"]["extraction_quality"], "poor")
+        # missing_count >= 3 triggers low confidence
+        self.assertEqual(artifact["confidence"], "low")
+
+
+class TestAnalystSchemaIncludesArtifactFields(unittest.TestCase):
+    def test_optional_artifact_fields_not_required(self) -> None:
+        """The new fields are present in properties but NOT in required, so missing values don't drop the signal."""
+        from signal_stream.analysis_tools import ANALYST_REVIEW_SCHEMA
+
+        item_schema = ANALYST_REVIEW_SCHEMA["properties"]["signals"]["items"]
+        props = item_schema["properties"]
+        # New fields exist in the schema.
+        for field in ("mechanism", "key_actors", "affected_parties", "evidence_excerpts", "confidence", "confidence_reason"):
+            self.assertIn(field, props)
+        # But none of them are in required — Python validates post-hoc.
+        required = item_schema.get("required", [])
+        for field in ("mechanism", "key_actors", "affected_parties", "evidence_excerpts", "confidence", "confidence_reason"):
+            self.assertNotIn(field, required)
+
+
+class TestTruncationEventsSurfaced(unittest.TestCase):
+    def test_review_returns_truncation_events_when_fallback_fires(self) -> None:
+        """_review_signals_in_chunks emits one truncation_event per truncated signal."""
+        huge_text = "Y" * 20000
+        signal = _make_signal(0, body=huge_text)
+        review_context = {signal.id: {"article_text": huge_text}}
+        behavior = {"analyst_review_limit": 5, "analyst_review_batch_size": 1}
+
+        call_count = 0
+
+        def fake_chat_json(system, user, schema=None, *, temperature=0.0, required_fields=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                mock_llm.last_error = "context length exceeded"
+                return None
+            mock_llm.last_error = None
+            payload = json.loads(user)
+            items = payload.get("signals", [])
+            return {"signals": [{"id": s["id"], "score": 50, "short_summary": "s", "expanded_summary": "e", "entities": {}} for s in items]}
+
+        mock_llm = MagicMock()
+        mock_llm.chat_json.side_effect = fake_chat_json
+        mock_llm.last_error = None
+
+        reviewed, truncation_events = _review_signals_in_chunks(
+            mock_llm, "sys", [signal], behavior, review_context
+        )
+
+        self.assertEqual(len(truncation_events), 1)
+        self.assertEqual(truncation_events[0]["signal_id"], signal.id)
+        self.assertEqual(truncation_events[0]["chars_total"], 20000)
+        self.assertLessEqual(truncation_events[0]["chars_sent"], 8000)
 
 
 if __name__ == "__main__":

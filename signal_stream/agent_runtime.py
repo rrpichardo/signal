@@ -250,6 +250,17 @@ class SignalAgentRuntime:
                     result = self._call_worker(run_id, analyst, "analyze_articles", {"articles": state["articles"]})
                     state["analysis"] = result.get("data", {})
                     self.storage.save_agent_event(run_id, "Analyst", "observation", "Analyzed candidate articles.", _compact_result(result))
+                    # Phase 2: surface each truncated article as its own event so
+                    # the activity log shows exactly which signals lost text — and
+                    # the dashboard can badge low-confidence rows accordingly.
+                    for trunc in list(state["analysis"].get("truncation_events", [])):
+                        self.storage.save_agent_event(
+                            run_id,
+                            "Analyst",
+                            "truncated_article",
+                            f"Article truncated for Groq review (signal {trunc.get('signal_id')}).",
+                            trunc,
+                        )
                 elif decision.action == "critique_digest":
                     # Step 2d: Critic reviews the Analyst's ranked signals before
                     # the Orchestrator decides to ship. If the score is below the
@@ -528,6 +539,12 @@ def _compact_result(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def _signal_from_json(item: dict[str, Any]) -> Signal:
+    # Phase 2: pass the artifact through the worker boundary if present. A dict
+    # stays a dict; anything else (including None) becomes None so the storage
+    # layer can write null rather than serialize garbage.
+    artifact = item.get("analyst_artifact")
+    if not isinstance(artifact, dict):
+        artifact = None
     return Signal(
         id=str(item.get("id", "")),
         cluster_id=str(item.get("cluster_id", "")),
@@ -552,4 +569,5 @@ def _signal_from_json(item: dict[str, Any]) -> Signal:
         icon_key=str(item.get("icon_key", "")),
         scout_note=str(item.get("scout_note", "")),
         relevance_label=str(item.get("relevance_label", "")),
+        analyst_artifact=artifact,
     )

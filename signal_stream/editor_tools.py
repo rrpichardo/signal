@@ -182,7 +182,7 @@ def _run_single_fallback(
             },
         }
 
-        raw = _chat_json_with_truncation_fallback(
+        raw, _trunc = _chat_json_with_truncation_fallback(
             brain,
             analyst_prompt,
             json.dumps(payload, sort_keys=True),

@@ -61,6 +61,33 @@ ANALYST_REVIEW_SCHEMA = {
                     "short_summary": {"type": "string"},
                     "expanded_summary": {"type": "string"},
                     "entities": {"type": "object"},
+                    # Phase 2: richer artifact fields. Optional on purpose —
+                    # if the model omits or truncates them the signal is still
+                    # accepted; Python post-validates and downgrades confidence.
+                    "mechanism": {"type": "string"},
+                    "key_actors": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "role": {"type": "string"},
+                            },
+                        },
+                    },
+                    "affected_parties": {"type": "array", "items": {"type": "string"}},
+                    "evidence_excerpts": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "quote": {"type": "string"},
+                                "source_offset": {"type": "integer"},
+                            },
+                        },
+                    },
+                    "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+                    "confidence_reason": {"type": "string"},
                 },
                 # why_it_matters dropped — strategic implication folded into short_summary.
                 # Keep it in storage and API for old-run compatibility.
@@ -173,7 +200,7 @@ def analyze_articles(
     if behavior.get("analyst_full_review"):
         signals, review_context = _fetch_full_pages_for_top_n(signals, review_context, review_limit)
 
-    signals = _apply_analyst_mode(signals, config, analyst_mode, analyst_prompt, behavior, review_context)
+    signals, truncation_events = _apply_analyst_mode(signals, config, analyst_mode, analyst_prompt, behavior, review_context)
     signals.sort(key=lambda item: item.score, reverse=True)
     digest = render_digest(config, signals, trace.events)
     return {
@@ -181,6 +208,9 @@ def analyze_articles(
         "cluster_count": len(clusters),
         "signals": [_signal_json(signal) for signal in signals],
         "digest": digest,
+        # Phase 2: surface truncation events so the orchestrator can emit a
+        # `truncated_article` activity event per affected signal.
+        "truncation_events": truncation_events,
         "trace": [{"agent": event.agent, "message": event.message, "metadata": event.metadata} for event in trace.events],
     }
 
@@ -277,6 +307,9 @@ def _signal_json(signal: Signal) -> dict[str, Any]:
         "icon_key": signal.icon_key,
         "scout_note": signal.scout_note,
         "relevance_label": signal.relevance_label,
+        # Phase 2: artifact rides on the signal dict through the worker stdout
+        # and back into agent_runtime so save_run_atomic can persist it.
+        "analyst_artifact": signal.analyst_artifact,
     }
 
 
@@ -287,21 +320,28 @@ def _apply_analyst_mode(
     analyst_prompt: str,
     behavior: dict[str, Any],
     review_context: dict[str, dict[str, Any]],
-) -> list[Signal]:
+) -> tuple[list[Signal], list[dict[str, Any]]]:
     """Optionally let the model polish Analyst output.
 
     Plain English: the code still does the dependable base work first
     (dedupe, scoring, memory penalties). In hybrid/model mode, the LLM gets a
     second pass to improve human-judgment fields like summary and why-it-matters.
+
+    Phase 2: also assembles the per-signal analyst_artifact and surfaces
+    truncation_events for the orchestrator to log as activity events.
     """
     if analyst_mode not in {"hybrid", "model"} or not signals:
-        return signals
+        return signals, []
 
     llm = BrainClient(config)
     if not llm.available():
-        return signals
+        return signals, []
 
-    reviewed = _review_signals_in_chunks(llm, analyst_prompt, signals, behavior, review_context) if behavior.get("analyst_full_review") else {}
+    truncation_events: list[dict[str, Any]] = []
+    if behavior.get("analyst_full_review"):
+        reviewed, truncation_events = _review_signals_in_chunks(llm, analyst_prompt, signals, behavior, review_context)
+    else:
+        reviewed = {}
     updated = []
     review_limit = int(behavior.get("analyst_review_limit", 40))
     for index, signal in enumerate(signals):
@@ -334,8 +374,149 @@ def _apply_analyst_mode(
         signal.why_it_matters = normalize_space(item.get("why_it_matters", signal.why_it_matters)) or signal.why_it_matters
         signal.entities = _merge_entities(signal.entities, item.get("entities", {}), behavior)
         signal.urgency = _urgency(signal.score, config.critical_threshold)
+        # Phase 2: assemble the per-signal artifact from the model response,
+        # apply Python's confidence overrides, and stamp truncation metadata.
+        signal.analyst_artifact = _build_artifact(signal, item)
         updated.append(signal)
-    return updated
+    return updated, truncation_events
+
+
+def _build_artifact(signal: Signal, item: dict[str, Any]) -> dict[str, Any]:
+    """Construct the analyst_artifact blob from the model's response and Python overrides.
+
+    Plain English: the Groq response already passed schema validation (the required
+    fields exist). Optional fields may be missing or empty — that's fine, we just
+    note the gaps. We capture what the model reported, then Python rules can
+    downgrade confidence when something looks shaky (heavy truncation or a
+    single-source story).
+    """
+    # Trim any internal-only keys before stamping the artifact.
+    trunc_info = item.get("_truncation") or {}
+
+    mechanism = normalize_space(str(item.get("mechanism", "")))
+    confidence_reason = normalize_space(str(item.get("confidence_reason", "")))
+
+    # Coerce model_confidence to one of {low, medium, high}; everything else
+    # collapses to "low" so downgrade math has a known starting point.
+    raw_confidence = str(item.get("confidence", "")).strip().lower()
+    if raw_confidence not in {"low", "medium", "high"}:
+        raw_confidence = "low"
+    model_confidence = raw_confidence
+
+    # Collect optional structured fields. The schema lets these be omitted, but
+    # any provided list/dict gets normalized to the shape consumers can rely on.
+    key_actors_raw = item.get("key_actors") or []
+    key_actors: list[dict[str, str]] = []
+    if isinstance(key_actors_raw, list):
+        for entry in key_actors_raw:
+            if isinstance(entry, dict):
+                key_actors.append({
+                    "name": normalize_space(str(entry.get("name", ""))),
+                    "role": normalize_space(str(entry.get("role", ""))),
+                })
+
+    affected_parties_raw = item.get("affected_parties") or []
+    affected_parties: list[str] = []
+    if isinstance(affected_parties_raw, list):
+        affected_parties = [normalize_space(str(p)) for p in affected_parties_raw if str(p).strip()]
+
+    evidence_raw = item.get("evidence_excerpts") or []
+    evidence: list[dict[str, Any]] = []
+    if isinstance(evidence_raw, list):
+        for entry in evidence_raw:
+            if isinstance(entry, dict):
+                evidence.append({
+                    "quote": normalize_space(str(entry.get("quote", ""))),
+                    "source_offset": int(entry.get("source_offset", 0)) if str(entry.get("source_offset", "")).lstrip("-").isdigit() else 0,
+                })
+
+    # Build the _meta block. We treat the model's "thin output" (missing optional
+    # fields or short mechanism) as a quality signal that Python can act on
+    # later — we record it here, not as an enum yet, but as a count.
+    missing_fields = []
+    if not mechanism:
+        missing_fields.append("mechanism")
+    if not key_actors:
+        missing_fields.append("key_actors")
+    if not affected_parties:
+        missing_fields.append("affected_parties")
+    if not evidence:
+        missing_fields.append("evidence_excerpts")
+
+    chars_total = int(trunc_info.get("chars_total", 0))
+    chars_sent = int(trunc_info.get("chars_sent", chars_total))
+    was_truncated = bool(trunc_info.get("was_truncated", False))
+
+    # extraction_quality is a rough roll-up: poor when truncated heavily OR many
+    # optional fields are missing; partial when one or two are missing; good otherwise.
+    if (was_truncated and chars_total > 0 and chars_sent / chars_total < 0.5) or len(missing_fields) >= 3:
+        extraction_quality = "poor"
+    elif missing_fields:
+        extraction_quality = "partial"
+    else:
+        extraction_quality = "good"
+
+    meta = {
+        "was_truncated": was_truncated,
+        "chars_total": chars_total,
+        "chars_sent": chars_sent,
+        "extraction_quality": extraction_quality,
+        "missing_fields": missing_fields,
+    }
+
+    # Apply Python's confidence-override rules. The model's own value is kept
+    # under model_confidence for telemetry — the post-override value is what
+    # downstream consumers (Editor, UI badges) read.
+    final_confidence = _override_confidence(
+        model_confidence=model_confidence,
+        was_truncated=was_truncated,
+        chars_total=chars_total,
+        chars_sent=chars_sent,
+        duplicate_count=signal.duplicate_count,
+        missing_count=len(missing_fields),
+    )
+
+    return {
+        "mechanism": mechanism,
+        "key_actors": key_actors,
+        "affected_parties": affected_parties,
+        "evidence_excerpts": evidence,
+        "confidence": final_confidence,
+        "confidence_reason": confidence_reason,
+        "model_confidence": model_confidence,
+        # Critic flags are populated by the Critic worker in Phase 3+; reserve
+        # the key so the JSON shape is stable across phases.
+        "critic_flags": [],
+        "_meta": meta,
+    }
+
+
+def _override_confidence(
+    *,
+    model_confidence: str,
+    was_truncated: bool,
+    chars_total: int,
+    chars_sent: int,
+    duplicate_count: int,
+    missing_count: int,
+) -> str:
+    """Python rules that can only downgrade the model's confidence, never raise it.
+
+    Plain English: the model self-reports how sure it is, but Python overrides
+    when the evidence base is thin — heavy truncation, single-source story, or
+    too many optional fields missing all collapse the result to "low".
+    """
+    # Heavy truncation = lost more than half the article. Hard downgrade.
+    if was_truncated and chars_total > 0 and (chars_sent / chars_total) < 0.5:
+        return "low"
+    # Single-source (no corroborating articles in the cluster) erodes confidence.
+    if duplicate_count == 0:
+        return "low"
+    # Three or more optional fields empty signals a thin output — match the
+    # extraction_quality="poor" threshold so the artifact reads coherently.
+    if missing_count >= 3:
+        return "low"
+    return model_confidence
 
 
 _FULL_PAGE_MIN_CHARS = 200    # body shorter than this → keep RSS body
@@ -376,19 +557,32 @@ def _chat_json_with_truncation_fallback(
     user: str,
     schema: dict[str, Any],
     required_fields: list[str] | None,
-) -> dict[str, Any] | None:
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """Call chat_json; on a context-too-large error, truncate article_text to 8000 chars and retry.
 
     Groq signals a too-large context via HTTP 400 with 'context_length_exceeded'
     (or similar) in the error body. We detect any None return whose last_error
     contains a size hint and retry once with the article body truncated.
+
+    Phase 2: returns (result, truncation_info). truncation_info has shape
+    {"was_truncated": bool, "chars_total": int, "chars_sent": int}. callers persist
+    it into the per-signal artifact _meta so downstream confidence logic and
+    activity events can react.
     """
+    # Sum of all article_text lengths in the payload — used as the "what was
+    # available" baseline so the artifact can report chars_total / chars_sent.
+    chars_total = _sum_article_text_chars(user)
+    truncation_info: dict[str, Any] = {
+        "was_truncated": False,
+        "chars_total": chars_total,
+        "chars_sent": chars_total,
+    }
     raw = llm.chat_json(system, user, schema, required_fields=required_fields)
     if raw is not None:
-        return raw
+        return raw, truncation_info
     last_err = (llm.last_error or "").lower()
     if not any(kw in last_err for kw in ("context", "too large", "length", "token", "limit")):
-        return None
+        return None, truncation_info
     # Parse payload, truncate article_text, retry once.
     try:
         payload = json.loads(user)
@@ -396,11 +590,14 @@ def _chat_json_with_truncation_fallback(
             text = str(signal_item.get("article_text", ""))
             if len(text) > _OVERSIZED_TRUNCATION:
                 signal_item["article_text"] = text[:_OVERSIZED_TRUNCATION]
+                truncation_info["was_truncated"] = True
                 print(
                     f"[signal_stream] Article too large for Groq; truncated to {_OVERSIZED_TRUNCATION} chars and retrying.",
                     file=sys.stderr,
                 )
         raw = llm.chat_json(system, json.dumps(payload, sort_keys=True), schema, required_fields=None)
+        # chars_sent reflects post-truncation total so confidence logic can compare ratios.
+        truncation_info["chars_sent"] = _sum_article_text_chars(json.dumps(payload, sort_keys=True))
     except (json.JSONDecodeError, Exception):  # noqa: BLE001
         pass
     if raw is None:
@@ -408,7 +605,24 @@ def _chat_json_with_truncation_fallback(
             "[signal_stream] Groq still failed after truncation; skipping this signal.",
             file=sys.stderr,
         )
-    return raw
+    return raw, truncation_info
+
+
+def _sum_article_text_chars(user_payload: str) -> int:
+    """Count total article_text characters across all signals in a chat_json user payload.
+
+    Used to populate truncation_info.chars_total / chars_sent.
+    Returns 0 if the payload doesn't parse — we treat unknown as zero so the
+    confidence-downgrade math fails safe (treats it as unknown, not truncated).
+    """
+    try:
+        payload = json.loads(user_payload)
+    except (json.JSONDecodeError, TypeError):
+        return 0
+    total = 0
+    for signal_item in payload.get("signals", []):
+        total += len(str(signal_item.get("article_text", "")))
+    return total
 
 
 def _review_signals_in_chunks(
@@ -417,19 +631,25 @@ def _review_signals_in_chunks(
     signals: list[Signal],
     behavior: dict[str, Any],
     review_context: dict[str, dict[str, Any]],
-) -> dict[str, dict[str, Any]]:
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
     """Review top signals one-per-Groq-request.
 
     Plain English: batch_size=1 sends each article to Groq individually. This is
     slower but much more reliable — the model can focus on one article at a time
     instead of juggling a batch. Groq's rate limit (30 req/min) is not a concern
     with the 60s 429 retry already in BrainClient.
+
+    Phase 2: returns (reviewed, truncation_events). truncation_events is a list
+    of {signal_id, chars_total, chars_sent} dicts surfaced for activity logging.
+    The reviewed dict embeds the same info under each signal's "_truncation" key
+    so the artifact builder can stamp it into _meta.
     """
 
     limit = int(behavior.get("analyst_review_limit", 40))
     batch_size = max(1, int(behavior.get("analyst_review_batch_size", 1)))
     candidates = signals[:limit]
     reviewed: dict[str, dict[str, Any]] = {}
+    truncation_events: list[dict[str, Any]] = []
     for index in range(0, len(candidates), batch_size):
         chunk = candidates[index : index + batch_size]
         payload = {
@@ -447,7 +667,7 @@ def _review_signals_in_chunks(
         # required_fields is intentionally NOT passed here because the analyst
         # response wraps fields inside {"signals": [{...}]}, not at the top level.
         # Validation happens below via result.get("signals").
-        raw = _chat_json_with_truncation_fallback(
+        raw, trunc_info = _chat_json_with_truncation_fallback(
             llm,
             analyst_prompt,
             user_msg,
@@ -461,9 +681,22 @@ def _review_signals_in_chunks(
             )
             continue
         for item in raw.get("signals", []):
-            if item.get("id"):
-                reviewed[item["id"]] = item
-    return reviewed
+            if not item.get("id"):
+                continue
+            # Stamp truncation info onto the returned item so the artifact builder
+            # downstream can fold it into _meta without re-plumbing.
+            item["_truncation"] = dict(trunc_info)
+            reviewed[item["id"]] = item
+            # Only surface a truncation_event when the fallback actually fired —
+            # one event per signal in the truncated chunk so the activity log
+            # shows which articles got cut down.
+            if trunc_info.get("was_truncated"):
+                truncation_events.append({
+                    "signal_id": item["id"],
+                    "chars_total": int(trunc_info.get("chars_total", 0)),
+                    "chars_sent": int(trunc_info.get("chars_sent", 0)),
+                })
+    return reviewed, truncation_events
 
 
 def _review_payload(signal: Signal, context: dict[str, Any]) -> dict[str, Any]:

@@ -136,9 +136,9 @@ class SignalStorage:
             _ensure_column(conn, "signals", "icon_key", "text")
             _ensure_column(conn, "signals", "scout_note", "text")
             _ensure_column(conn, "signals", "relevance_label", "text")
-            # Phase 2/4: per-signal analyst artifact (mechanism, key_actors, evidence, confidence, truncation meta).
+            # Per-signal analyst artifact (mechanism, key_actors, evidence, confidence, truncation meta).
             _ensure_column(conn, "signals", "analyst_artifact_json", "text")
-            # Phase 3/4/5: Editor briefing columns on agent_runs.
+            # Editor briefing columns on agent_runs.
             _ensure_column(conn, "agent_runs", "briefing_json", "text")
             _ensure_column(conn, "agent_runs", "briefing_status", "text")
             _ensure_column(conn, "agent_runs", "briefing_error", "text")
@@ -179,9 +179,9 @@ class SignalStorage:
                     id, cluster_id, article_id, title, url, source, published_at, score, urgency, event_type,
                     summary, short_summary, expanded_summary, why_it_matters, next_steps_json, score_breakdown_json,
                     matched_priorities_json, entities_json, image_url, icon_key, scout_note, relevance_label,
-                    duplicate_count, created_at
+                    duplicate_count, analyst_artifact_json, created_at
                 )
-                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 on conflict(id) do update set
                     score=excluded.score,
                     urgency=excluded.urgency,
@@ -198,6 +198,7 @@ class SignalStorage:
                     scout_note=excluded.scout_note,
                     relevance_label=excluded.relevance_label,
                     duplicate_count=excluded.duplicate_count,
+                    analyst_artifact_json=excluded.analyst_artifact_json,
                     created_at=excluded.created_at
                 """,
                 [
@@ -225,6 +226,9 @@ class SignalStorage:
                         signal.scout_note,
                         signal.relevance_label,
                         signal.duplicate_count,
+                        # Serialize artifact to JSON if present; null otherwise so old
+                        # consumers that don't read this column stay unaffected.
+                        json.dumps(signal.analyst_artifact, sort_keys=True) if signal.analyst_artifact else None,
                         completed_at,
                     )
                     for signal in signals
@@ -298,9 +302,9 @@ class SignalStorage:
                     id, cluster_id, article_id, title, url, source, published_at, score, urgency, event_type,
                     summary, short_summary, expanded_summary, why_it_matters, next_steps_json, score_breakdown_json,
                     matched_priorities_json, entities_json, image_url, icon_key, scout_note, relevance_label,
-                    duplicate_count, created_at
+                    duplicate_count, analyst_artifact_json, created_at
                 )
-                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 on conflict(id) do update set
                     score=excluded.score,
                     urgency=excluded.urgency,
@@ -317,6 +321,7 @@ class SignalStorage:
                     scout_note=excluded.scout_note,
                     relevance_label=excluded.relevance_label,
                     duplicate_count=excluded.duplicate_count,
+                    analyst_artifact_json=excluded.analyst_artifact_json,
                     created_at=excluded.created_at
                 """,
                 [
@@ -344,6 +349,8 @@ class SignalStorage:
                         signal.scout_note,
                         signal.relevance_label,
                         signal.duplicate_count,
+                        # Persist artifact as JSON or null; the read path tolerates absence.
+                        json.dumps(signal.analyst_artifact, sort_keys=True) if signal.analyst_artifact else None,
                         completed_at,
                     )
                     for signal in signals

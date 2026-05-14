@@ -206,14 +206,16 @@ brain_file = "{brain_path}"
         original = analysis_tools.BrainClient
         analysis_tools.BrainClient = FakeBrain
         try:
-            updated = _apply_analyst_mode(
+            # Phase 2: _apply_analyst_mode now returns (signals, truncation_events).
+            updated_signals, _ = _apply_analyst_mode(
                 [signal],
                 config,
                 "hybrid",
                 "prompt",
                 {"model_score_adjustment_limit": 20, "summary_mode": "short_expanded", "entity_extraction": "hybrid", "analyst_full_review": True},
                 {"sig_1": {"article_text": "Full article text for the model."}},
-            )[0]
+            )
+            updated = updated_signals[0]
         finally:
             analysis_tools.BrainClient = original
 
@@ -287,14 +289,16 @@ brain_file = "{brain_path}"
         original = analysis_tools.BrainClient
         analysis_tools.BrainClient = FakeBrain
         try:
-            updated = _apply_analyst_mode(
+            # Phase 2: _apply_analyst_mode now returns (signals, truncation_events).
+            updated_signals, _ = _apply_analyst_mode(
                 [signal],
                 config,
                 "hybrid",
                 "prompt",
                 {"model_score_adjustment_limit": 20, "summary_mode": "short_expanded", "entity_extraction": "hybrid", "analyst_full_review": True},
                 {"sig_1": {"article_text": "The company launched a new agent evaluation tool for development teams."}},
-            )[0]
+            )
+            updated = updated_signals[0]
         finally:
             analysis_tools.BrainClient = original
 
@@ -354,14 +358,16 @@ brain_file = "{brain_path}"
         original = analysis_tools.BrainClient
         analysis_tools.BrainClient = FakeBrain
         try:
-            updated = _apply_analyst_mode(
+            # Phase 2: _apply_analyst_mode now returns (signals, truncation_events).
+            updated_signals, _ = _apply_analyst_mode(
                 [signal],
                 config,
                 "hybrid",
                 "prompt",
                 {"model_score_adjustment_limit": 20, "summary_mode": "short_expanded", "entity_extraction": "hybrid", "analyst_review_limit": 30},
                 {"sig_1": {"article_text": "Article about simplifying DAX reporting logic."}},
-            )[0]
+            )
+            updated = updated_signals[0]
         finally:
             analysis_tools.BrainClient = original
 
