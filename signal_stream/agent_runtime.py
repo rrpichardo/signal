@@ -535,6 +535,12 @@ class SignalAgentRuntime:
             self.storage.save_agent_event(run_id, "Editor", "skipped", "No signals; skipping briefing.", {})
             return None, "skipped", ""
 
+        import time as _time
+        # The analyst just made up to analyst_review_limit Groq calls, which
+        # often exhausts the per-minute rate limit. A short pause lets the
+        # Groq rate-limit window recover before the editor's single call.
+        _time.sleep(30)
+
         try:
             result = self._call_worker(run_id, editor, "generate_briefing", {
                 "signals": raw_signals,
