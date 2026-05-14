@@ -11,6 +11,7 @@ from typing import Any
 
 from .analysis_tools import analyze_articles, score_digest_quality
 from .config import load_config
+from .editor_tools import generate_briefing_from_artifacts
 from .llm import BrainClient
 from .models import SourceConfig
 from .prompt_loader import load_behavior_settings, load_prompt_set, load_scoring_rubric
@@ -34,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
     """
 
     parser = argparse.ArgumentParser(description="Signal Stream worker process.")
-    parser.add_argument("agent", choices=["scout", "analyst", "critic"])
+    parser.add_argument("agent", choices=["scout", "analyst", "critic", "editor"])
     parser.add_argument("--config", default="configs/ai_tech.toml")
     args = parser.parse_args(argv)
 
@@ -148,6 +149,50 @@ def handle_task(
         # Confidence is high when the score is high — nothing suspicious.
         confidence = max(0.1, min(1.0, data.get("score", 0) / 100))
         return _ok(task_id, agent, data, confidence)
+
+    if agent == "editor" and task_type == "generate_briefing":
+        top_signals_raw = list(payload.get("signals", []))
+        run_context = dict(payload.get("run_context") or {})
+        editor_prompt = prompts.get("editor", "You are the Signal Stream Editor. Write an executive briefing in JSON.")
+        if not top_signals_raw:
+            return _ok(task_id, agent, {"briefing": None, "briefing_status": "skipped"}, 0.0)
+        # Reconstruct lightweight Signal objects from the raw dicts the Orchestrator sends.
+        from .models import Signal as _Signal  # local to avoid circular at module level
+        top_signals = [
+            _Signal(
+                id=str(s.get("id", "")),
+                cluster_id=str(s.get("cluster_id", "")),
+                article_id=str(s.get("article_id", "")),
+                title=str(s.get("title", "")),
+                url=str(s.get("url", "")),
+                source=str(s.get("source", "")),
+                published_at=str(s.get("published_at", "")),
+                score=int(s.get("score", 0)),
+                urgency=str(s.get("urgency", "")),
+                event_type=str(s.get("event_type", "")),
+                summary=str(s.get("summary", "")),
+                why_it_matters=str(s.get("why_it_matters", "")),
+                next_steps=list(s.get("next_steps", [])),
+                matched_priorities=list(s.get("matched_priorities", [])),
+                entities=dict(s.get("entities", {})),
+                duplicate_count=int(s.get("duplicate_count", 0)),
+                score_breakdown=list(s.get("score_breakdown", [])),
+                short_summary=str(s.get("short_summary", s.get("summary", ""))),
+                expanded_summary=str(s.get("expanded_summary", s.get("summary", ""))),
+                image_url=str(s.get("image_url", "")),
+                icon_key=str(s.get("icon_key", "")),
+                scout_note=str(s.get("scout_note", "")),
+                relevance_label=str(s.get("relevance_label", "")),
+                analyst_artifact=s.get("analyst_artifact") if isinstance(s.get("analyst_artifact"), dict) else None,
+            )
+            for s in top_signals_raw
+        ]
+        llm = BrainClient(config)
+        briefing = generate_briefing_from_artifacts(top_signals, llm, editor_prompt, run_context)
+        coverage = briefing.get("artifact_coverage", {})
+        has_gap = coverage.get("missing", 0) > 0 or coverage.get("thin", 0) > 0
+        status = "partial" if has_gap else "generated"
+        return _ok(task_id, agent, {"briefing": briefing, "briefing_status": status}, 0.9)
 
     return {
         "task_id": task_id,
