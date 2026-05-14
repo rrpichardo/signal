@@ -136,6 +136,11 @@ class SignalStorage:
             _ensure_column(conn, "signals", "icon_key", "text")
             _ensure_column(conn, "signals", "scout_note", "text")
             _ensure_column(conn, "signals", "relevance_label", "text")
+            # Phase 2: per-signal artifact blob (mechanism, key_actors, evidence,
+            # confidence, truncation metadata). Opaque JSON — matches the existing
+            # score_breakdown_json / matched_priorities_json pattern. Old rows have
+            # null; _hydrate_signal_row tolerates it.
+            _ensure_column(conn, "signals", "analyst_artifact_json", "text")
 
     def save_run(self, articles: list[Article], signals: list[Signal], cluster_count: int, output_path: str, started_at: str) -> None:
         completed_at = utc_now_iso()
@@ -173,9 +178,9 @@ class SignalStorage:
                     id, cluster_id, article_id, title, url, source, published_at, score, urgency, event_type,
                     summary, short_summary, expanded_summary, why_it_matters, next_steps_json, score_breakdown_json,
                     matched_priorities_json, entities_json, image_url, icon_key, scout_note, relevance_label,
-                    duplicate_count, created_at
+                    duplicate_count, analyst_artifact_json, created_at
                 )
-                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 on conflict(id) do update set
                     score=excluded.score,
                     urgency=excluded.urgency,
@@ -192,6 +197,7 @@ class SignalStorage:
                     scout_note=excluded.scout_note,
                     relevance_label=excluded.relevance_label,
                     duplicate_count=excluded.duplicate_count,
+                    analyst_artifact_json=excluded.analyst_artifact_json,
                     created_at=excluded.created_at
                 """,
                 [
@@ -219,6 +225,9 @@ class SignalStorage:
                         signal.scout_note,
                         signal.relevance_label,
                         signal.duplicate_count,
+                        # Serialize artifact to JSON if present; null otherwise so old
+                        # consumers that don't read this column stay unaffected.
+                        json.dumps(signal.analyst_artifact, sort_keys=True) if signal.analyst_artifact else None,
                         completed_at,
                     )
                     for signal in signals
@@ -292,9 +301,9 @@ class SignalStorage:
                     id, cluster_id, article_id, title, url, source, published_at, score, urgency, event_type,
                     summary, short_summary, expanded_summary, why_it_matters, next_steps_json, score_breakdown_json,
                     matched_priorities_json, entities_json, image_url, icon_key, scout_note, relevance_label,
-                    duplicate_count, created_at
+                    duplicate_count, analyst_artifact_json, created_at
                 )
-                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 on conflict(id) do update set
                     score=excluded.score,
                     urgency=excluded.urgency,
@@ -311,6 +320,7 @@ class SignalStorage:
                     scout_note=excluded.scout_note,
                     relevance_label=excluded.relevance_label,
                     duplicate_count=excluded.duplicate_count,
+                    analyst_artifact_json=excluded.analyst_artifact_json,
                     created_at=excluded.created_at
                 """,
                 [
@@ -338,6 +348,8 @@ class SignalStorage:
                         signal.scout_note,
                         signal.relevance_label,
                         signal.duplicate_count,
+                        # Persist artifact as JSON or null; the read path tolerates absence.
+                        json.dumps(signal.analyst_artifact, sort_keys=True) if signal.analyst_artifact else None,
                         completed_at,
                     )
                     for signal in signals
@@ -411,7 +423,7 @@ class SignalStorage:
                 """
                 select id, title, score, urgency, event_type, source, published_at, summary, short_summary,
                        expanded_summary, why_it_matters, url, score_breakdown_json, entities_json, image_url,
-                       icon_key, scout_note, relevance_label, created_at
+                       icon_key, scout_note, relevance_label, analyst_artifact_json, created_at
                 from signals
                 order by created_at desc, score desc
                 limit ?
@@ -452,7 +464,7 @@ class SignalStorage:
         query = """
             select id, title, score, urgency, event_type, source, published_at, summary, short_summary,
                    expanded_summary, why_it_matters, url, score_breakdown_json, entities_json, image_url,
-                   icon_key, scout_note, relevance_label, created_at
+                   icon_key, scout_note, relevance_label, analyst_artifact_json, created_at
             from signals
         """
         params: list[Any] = []
@@ -481,7 +493,7 @@ class SignalStorage:
                 """
                 select id, title, score, urgency, event_type, source, published_at, summary, short_summary,
                        expanded_summary, why_it_matters, url, score_breakdown_json, entities_json, image_url,
-                       icon_key, scout_note, relevance_label, created_at
+                       icon_key, scout_note, relevance_label, analyst_artifact_json, created_at
                 from signals where id = ?
                 """,
                 (signal_id,),
@@ -502,7 +514,7 @@ class SignalStorage:
         query = """
             select id, title, score, urgency, event_type, source, published_at, summary, short_summary,
                    expanded_summary, why_it_matters, url, score_breakdown_json, entities_json, image_url,
-                   icon_key, scout_note, relevance_label, created_at
+                   icon_key, scout_note, relevance_label, analyst_artifact_json, created_at
             from signals
         """
         params: list[Any] = []
@@ -553,6 +565,17 @@ class SignalStorage:
             item["entities"] = json.loads(item.pop("entities_json") or "{}")
         except json.JSONDecodeError:
             item["entities"] = {}
+        # Phase 2: parse the analyst artifact blob. Old rows or rows where the
+        # model review didn't populate it come back as null — _hydrate keeps
+        # the key in the dict so the API contract is consistent.
+        raw_artifact = item.pop("analyst_artifact_json", None)
+        if raw_artifact:
+            try:
+                item["analyst_artifact"] = json.loads(raw_artifact)
+            except json.JSONDecodeError:
+                item["analyst_artifact"] = None
+        else:
+            item["analyst_artifact"] = None
         item["short_summary"] = item.get("short_summary") or item.get("summary") or ""
         item["expanded_summary"] = item.get("expanded_summary") or item.get("short_summary") or ""
         item["icon_key"] = item.get("icon_key") or item.get("event_type") or "signal"

@@ -164,6 +164,11 @@ class Signal:
     icon_key: str = ""
     scout_note: str = ""
     relevance_label: str = ""
+    # Phase 2: richer per-signal artifacts written by the Analyst review pass.
+    # Optional JSON blob containing mechanism, key_actors, evidence_excerpts,
+    # confidence, truncation metadata, etc. None when the model review didn't
+    # populate it (old rows, code-path runs, brain unavailable).
+    analyst_artifact: dict[str, Any] | None = None
 
 
 @dataclass

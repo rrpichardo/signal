@@ -78,6 +78,35 @@ expanded_summary (5-8 sentences, 120-220 words):
   - Close with the forward-looking implication — what decision or action does this development inform?
   - Do NOT pad with generic AI commentary or repeat the short_summary verbatim.
 
+Artifact fields — these are optional. If you cannot fill one cleanly from the article, omit it; do NOT invent content. Python will record the omission and downgrade confidence.
+
+mechanism (1-2 sentences, up to ~50 words):
+  - The causal lever: how does this development actually create the impact you describe?
+  - Example: "By dropping the rate-limit ceiling from 100k to 1M tokens/minute, Anthropic enables agent workloads that previously required throttling, shifting the bottleneck back to inference cost."
+  - Do NOT restate the headline.
+
+key_actors (array of {name, role} objects, 1-5 entries):
+  - The specific organizations or people whose actions drive the story.
+  - "role" is one short noun phrase (e.g., "issuing regulator", "acquiring party", "research lead").
+
+affected_parties (array of strings, 1-5 entries):
+  - The audiences or stakeholders whose decisions will change as a result.
+  - Examples: "model providers competing on inference cost", "enterprise legal teams reviewing AI vendor contracts".
+
+evidence_excerpts (array of {quote, source_offset} objects, 1-3 entries):
+  - Verbatim short quotes (15-40 words each) pulled from the article that anchor your read.
+  - source_offset is the character index where the quote starts in article_text. If unsure, use 0.
+  - Pull quotes that contain numbers, named entities, or direct statements — not framing prose.
+
+confidence (one of "low" | "medium" | "high"):
+  - "high" = primary-source reporting with named actors and clear numbers.
+  - "medium" = solid secondary coverage or strong analysis with some inference.
+  - "low" = thin article, heavy speculation, or evidence you wouldn't stake your read on.
+  - Python may downgrade your call when the article was truncated or single-sourced — that is expected.
+
+confidence_reason (one short sentence):
+  - Why this confidence level. Example: "Single trade-press source citing two named exec sources; corroborating coverage absent."
+
 Scoring guidance:
 - prefer current, meaningful AI/tech developments over generic tutorials or event promotions
 - prefer strategic impact over hype
