@@ -107,19 +107,34 @@ class BrainClient:
                 raw = json.loads(response.read().decode("utf-8"))
         except error.HTTPError as exc:
             if exc.code == 429:
-                # Rate limit: sleep 15s and retry once. Was 60s, which caused
-                # the analyst to blow the 2400s worker timeout when many articles
-                # hit the limit in the same batch.
-                time.sleep(15)
+                # Use Groq's retry-after header when present; fall back to 15s.
+                try:
+                    wait = int(exc.headers.get("retry-after") or exc.headers.get("x-ratelimit-reset-requests") or 15)
+                except (TypeError, ValueError):
+                    wait = 15
+                wait = max(1, min(wait, 120))  # clamp to [1, 120]
+                time.sleep(wait)
                 try:
                     with request.urlopen(req, timeout=self.config.timeout_seconds) as response:
                         raw = json.loads(response.read().decode("utf-8"))
                 except error.HTTPError as exc2:
                     if exc2.code == 429:
-                        self.last_error = "Hit Groq rate limit twice. Wait and retry."
+                        # Second hit: read header again and wait once more before giving up.
+                        try:
+                            wait2 = int(exc2.headers.get("retry-after") or exc2.headers.get("x-ratelimit-reset-requests") or 30)
+                        except (TypeError, ValueError):
+                            wait2 = 30
+                        wait2 = max(1, min(wait2, 120))
+                        time.sleep(wait2)
+                        try:
+                            with request.urlopen(req, timeout=self.config.timeout_seconds) as response:
+                                raw = json.loads(response.read().decode("utf-8"))
+                        except Exception as exc3:  # noqa: BLE001
+                            self.last_error = f"Hit Groq rate limit three times: {exc3}"
+                            return None
                     else:
                         self.last_error = f"Groq HTTP {exc2.code}: {exc2.reason}"
-                    return None
+                        return None
                 except Exception as exc2:  # noqa: BLE001
                     self.last_error = str(exc2)
                     return None
