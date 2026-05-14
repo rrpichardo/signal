@@ -11,6 +11,7 @@ import threading
 from urllib.parse import parse_qs, urlparse
 
 from .agent_runtime import AgentRuntimeError, SignalAgentRuntime
+from .cli import _load_dotenv
 from .models import SignalConfig
 from .prompt_loader import (
     DEFAULT_DISPLAY_SETTINGS,
@@ -188,6 +189,7 @@ def _start_agent_run(config: SignalConfig, config_path: str) -> bool:
 
     def _run() -> None:
         try:
+            _load_dotenv(config_path)  # pick up .env if dashboard was started without the key
             SignalAgentRuntime(config, config_path=config_path).run()
         except AgentRuntimeError as exc:
             _run_state["error"] = str(exc)
