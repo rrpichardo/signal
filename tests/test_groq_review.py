@@ -10,12 +10,17 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from signal_stream.analysis_tools import (
+    _apply_analyst_mode,
     _fetch_full_pages_for_top_n,
     _review_signals_in_chunks,
+    _signal_json,
     analyze_articles,
 )
-from signal_stream.models import Article, Cluster, Signal, SignalConfig, SignalDraft, stable_id
+from signal_stream.agent_runtime import _signal_from_json
+from signal_stream.editor_tools import generate_briefing_from_artifacts
+from signal_stream.models import Article, Cluster, Signal, SignalConfig, SignalDraft, stable_id, BrainConfig, Priority
 from signal_stream.source_tools import fetch_full_article_page
+from signal_stream.storage import SignalStorage
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +141,7 @@ class TestFullPageTextSentWhenExtractionSucceeds(unittest.TestCase):
         review_context = _make_review_context(signals)
 
         with patch("signal_stream.analysis_tools.fetch_full_article_page", return_value=(long_text, None)):
-            _, updated_ctx = _fetch_full_pages_for_top_n(signals, review_context, top_n=1)
+            _, updated_ctx, _ = _fetch_full_pages_for_top_n(signals, review_context, top_n=1)
 
         self.assertEqual(updated_ctx[signals[0].id]["article_text"], long_text)
 
@@ -153,7 +158,7 @@ class TestRSSBodyUsedWhenExtractionFails(unittest.TestCase):
         review_context = {signals[0].id: {"article_text": original_text}}
 
         with patch("signal_stream.analysis_tools.fetch_full_article_page", return_value=("", None)):
-            _, updated_ctx = _fetch_full_pages_for_top_n(signals, review_context, top_n=1)
+            _, updated_ctx, _ = _fetch_full_pages_for_top_n(signals, review_context, top_n=1)
 
         self.assertEqual(updated_ctx[signals[0].id]["article_text"], original_text)
 
@@ -433,7 +438,7 @@ class TestArtifactPersistedOnSignal(unittest.TestCase):
         original = analysis_tools.BrainClient
         analysis_tools.BrainClient = FakeBrain
         try:
-            updated_signals, _ = _apply_analyst_mode(
+            updated_signals, _, _ = _apply_analyst_mode(
                 [signal], config, "hybrid", "prompt",
                 {"analyst_full_review": True, "summary_mode": "short_expanded", "entity_extraction": "hybrid"},
                 {"sig_artifact": {"article_text": "A" * 4000}},
@@ -612,7 +617,7 @@ class TestTruncationEventsSurfaced(unittest.TestCase):
         mock_llm.chat_json.side_effect = fake_chat_json
         mock_llm.last_error = None
 
-        reviewed, truncation_events = _review_signals_in_chunks(
+        reviewed, truncation_events, _ = _review_signals_in_chunks(
             mock_llm, "sys", [signal], behavior, review_context
         )
 
@@ -620,6 +625,541 @@ class TestTruncationEventsSurfaced(unittest.TestCase):
         self.assertEqual(truncation_events[0]["signal_id"], signal.id)
         self.assertEqual(truncation_events[0]["chars_total"], 20000)
         self.assertLessEqual(truncation_events[0]["chars_sent"], 8000)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 test helpers
+# ---------------------------------------------------------------------------
+
+def _make_config_minimal() -> SignalConfig:
+    """Minimal SignalConfig that satisfies _apply_analyst_mode without loading TOML."""
+    return SignalConfig(
+        name="Test", organization="Test", audience="Reader", mission="Test",
+        competitors=[], markets=[], priorities=[Priority("AI")], sources=[],
+        storage_path=":memory:", output_dir=".", brain=BrainConfig(),
+    )
+
+
+def _valid_groq_response(signals: list[Signal]) -> dict:
+    """Groq response payload that passes schema validation for all given signals."""
+    return {
+        "signals": [
+            {
+                "id": s.id,
+                "score": 70,
+                "short_summary": "A model-written summary.",
+                "expanded_summary": "An expanded paragraph.",
+                "entities": {},
+                "mechanism": "A clear mechanism description with enough detail.",
+                "key_actors": [],
+                "affected_parties": [],
+                "evidence_excerpts": [],
+                "confidence": "medium",
+                "confidence_reason": "Corroborated coverage.",
+            }
+            for s in signals
+        ]
+    }
+
+
+# ---------------------------------------------------------------------------
+# Test 1: Second-pass retry succeeds after rate-limit on first pass
+# ---------------------------------------------------------------------------
+
+class TestSecondPassRetrySucceedsAfterRateLimit(unittest.TestCase):
+    def test_retry_succeeds(self) -> None:
+        """First-pass Groq call fails with rate_limit → signal gets pending_retry → second pass succeeds."""
+        signal = _make_signal(0, score=80)
+        review_context = _make_review_context([signal])
+        config = _make_config_minimal()
+
+        call_count = [0]
+
+        class FakeBrain:
+            def __init__(self, cfg):
+                self.last_error = None
+
+            def available(self):
+                return True
+
+            def chat_json(self, system, user, schema=None, **kwargs):
+                call_count[0] += 1
+                payload = json.loads(user)
+                sigs = payload.get("signals", [])
+                if call_count[0] == 1:
+                    self.last_error = "rate limit exceeded"
+                    return None
+                self.last_error = None
+                return _valid_groq_response([SimpleNamespace(id=s["id"]) for s in sigs])
+
+        import signal_stream.analysis_tools as at
+        original = at.BrainClient
+        at.BrainClient = FakeBrain
+        try:
+            result, _, failures = _apply_analyst_mode(
+                [signal], config, "hybrid", "prompt",
+                {"analyst_full_review": True, "analyst_review_limit": 5,
+                 "analyst_review_batch_size": 1, "analyst_retry_max_attempts": 1,
+                 "model_score_adjustment_limit": 20, "summary_mode": "short_expanded",
+                 "entity_extraction": "hybrid"},
+                review_context,
+            )
+        finally:
+            at.BrainClient = original
+
+        self.assertEqual(result[0].analyst_status, "success")
+        # First pass + retry = 2 analyst-level attempts (chat_json was called twice).
+        self.assertEqual(result[0].analyst_attempt_count, 2)
+        self.assertIsNotNone(result[0].analyst_artifact)
+        # No failures in the output because the retry succeeded.
+        self.assertEqual(failures, [])
+
+
+# ---------------------------------------------------------------------------
+# Test 2: Rate-limit exhausts both passes → failed
+# ---------------------------------------------------------------------------
+
+class TestRateLimitExhaustsBothPasses(unittest.TestCase):
+    def test_both_passes_fail(self) -> None:
+        """When Groq returns rate_limit on both passes the signal must end as failed."""
+        signal = _make_signal(0, score=80)
+        review_context = _make_review_context([signal])
+        config = _make_config_minimal()
+
+        class FakeBrain:
+            def __init__(self, cfg):
+                self.last_error = "rate limit exceeded"
+
+            def available(self):
+                return True
+
+            def chat_json(self, system, user, schema=None, **kwargs):
+                return None
+
+        import signal_stream.analysis_tools as at
+        original = at.BrainClient
+        at.BrainClient = FakeBrain
+        try:
+            result, _, failures = _apply_analyst_mode(
+                [signal], config, "hybrid", "prompt",
+                {"analyst_full_review": True, "analyst_review_limit": 5,
+                 "analyst_review_batch_size": 1, "analyst_retry_max_attempts": 1,
+                 "model_score_adjustment_limit": 20, "summary_mode": "short_expanded",
+                 "entity_extraction": "hybrid"},
+                review_context,
+            )
+        finally:
+            at.BrainClient = original
+
+        self.assertEqual(result[0].analyst_status, "failed")
+        self.assertEqual(result[0].analyst_error_type, "rate_limit")
+        self.assertIsNone(result[0].analyst_artifact)
+        self.assertEqual(len(failures), 1)
+
+
+# ---------------------------------------------------------------------------
+# Test 3: Malformed JSON gets failed status without a retry attempt
+# ---------------------------------------------------------------------------
+
+class TestMalformedJsonNoRetry(unittest.TestCase):
+    def test_invalid_json_fails_immediately(self) -> None:
+        """A json-decode error produces failed+invalid_json immediately (no retry)."""
+        signal = _make_signal(0, score=80)
+        review_context = _make_review_context([signal])
+        behavior = {"analyst_review_limit": 5, "analyst_review_batch_size": 1}
+
+        call_count = [0]
+
+        class FakeLLM:
+            last_error = "json decode error: unexpected token"
+
+            def chat_json(self, system, user, schema=None, **kwargs):
+                call_count[0] += 1
+                return None
+
+        llm = FakeLLM()
+        _, _, statuses = _review_signals_in_chunks(llm, "sys", [signal], behavior, review_context)
+
+        # json errors classify as failed (no pending_retry → no retry pass attempted).
+        self.assertEqual(statuses[signal.id]["status"], "failed")
+        self.assertEqual(statuses[signal.id]["error_type"], "invalid_json")
+        # Only one call because invalid_json doesn't trigger the truncation retry.
+        self.assertEqual(call_count[0], 1)
+
+
+# ---------------------------------------------------------------------------
+# Test 4: Short-body annotation appears in error_message when review also fails
+# ---------------------------------------------------------------------------
+
+class TestExtractionShortBodyAnnotated(unittest.TestCase):
+    def test_short_body_appears_in_error_message(self) -> None:
+        """When full-page extraction is short AND Groq fails, error_message includes 'short_body'."""
+        signal = _make_signal(0, score=70, url="https://example.com/article")
+        review_context = _make_review_context([signal])
+        behavior = {"analyst_review_limit": 5, "analyst_review_batch_size": 1}
+
+        class FakeLLM:
+            last_error = "rate limit exceeded"
+
+            def chat_json(self, system, user, schema=None, **kwargs):
+                return None
+
+        llm = FakeLLM()
+        short_body_ids = {signal.id}
+        _, _, statuses = _review_signals_in_chunks(
+            llm, "sys", [signal], behavior, review_context, short_body_ids=short_body_ids
+        )
+
+        err_msg = statuses[signal.id].get("error_message", "")
+        self.assertIn("short_body", err_msg)
+        self.assertEqual(statuses[signal.id]["error_type"], "rate_limit")
+
+
+# ---------------------------------------------------------------------------
+# Test 5: No pending_retry escapes _apply_analyst_mode
+# ---------------------------------------------------------------------------
+
+class TestNoPendingRetryEscapesAnalyzeArticles(unittest.TestCase):
+    def test_no_pending_retry_in_output(self) -> None:
+        """Terminal invariant: _apply_analyst_mode must not return any pending_retry signals."""
+        signals = [_make_signal(i, score=80 - i) for i in range(3)]
+        review_context = _make_review_context(signals)
+        config = _make_config_minimal()
+
+        class FakeBrain:
+            def __init__(self, cfg):
+                self.last_error = "rate limit exceeded"
+
+            def available(self):
+                return True
+
+            def chat_json(self, system, user, schema=None, **kwargs):
+                return None
+
+        import signal_stream.analysis_tools as at
+        original = at.BrainClient
+        at.BrainClient = FakeBrain
+        try:
+            result, _, _ = _apply_analyst_mode(
+                signals, config, "hybrid", "prompt",
+                {"analyst_full_review": True, "analyst_review_limit": 5,
+                 "analyst_review_batch_size": 1, "analyst_retry_max_attempts": 1,
+                 "model_score_adjustment_limit": 20, "summary_mode": "short_expanded",
+                 "entity_extraction": "hybrid"},
+                review_context,
+            )
+        finally:
+            at.BrainClient = original
+
+        pending_retry = [s for s in result if s.analyst_status == "pending_retry"]
+        self.assertEqual(pending_retry, [], "pending_retry must never escape _apply_analyst_mode")
+
+
+# ---------------------------------------------------------------------------
+# Test 6: analyst_status='success' iff analyst_artifact is non-null
+# ---------------------------------------------------------------------------
+
+class TestSuccessRequiresArtifact(unittest.TestCase):
+    def test_success_iff_artifact_present(self) -> None:
+        """North-star invariant: for every output signal, success↔artifact and failure↔no-artifact."""
+        s_ok = _make_signal(0, score=90)
+        s_fail = _make_signal(1, score=80)
+        review_context = {**_make_review_context([s_ok]), **_make_review_context([s_fail])}
+        config = _make_config_minimal()
+        call_count = [0]
+
+        class FakeBrain:
+            def __init__(self, cfg):
+                self.last_error = None
+
+            def available(self):
+                return True
+
+            def chat_json(self, system, user, schema=None, **kwargs):
+                call_count[0] += 1
+                payload = json.loads(user)
+                sigs = payload.get("signals", [])
+                # First call (s_ok) succeeds; all others fail.
+                if call_count[0] == 1:
+                    self.last_error = None
+                    return _valid_groq_response([SimpleNamespace(id=s["id"]) for s in sigs])
+                self.last_error = "rate limit exceeded"
+                return None
+
+        import signal_stream.analysis_tools as at
+        original = at.BrainClient
+        at.BrainClient = FakeBrain
+        try:
+            result, _, _ = _apply_analyst_mode(
+                [s_ok, s_fail], config, "hybrid", "prompt",
+                {"analyst_full_review": True, "analyst_review_limit": 5,
+                 "analyst_review_batch_size": 1, "analyst_retry_max_attempts": 1,
+                 "model_score_adjustment_limit": 20, "summary_mode": "short_expanded",
+                 "entity_extraction": "hybrid"},
+                review_context,
+            )
+        finally:
+            at.BrainClient = original
+
+        for sig in result:
+            if sig.analyst_status == "success":
+                self.assertIsNotNone(sig.analyst_artifact, f"{sig.id}: success with NULL artifact")
+            else:
+                self.assertIsNone(sig.analyst_artifact, f"{sig.id}: non-success with artifact present")
+
+
+# ---------------------------------------------------------------------------
+# Test 7: analyst_failures only contains selected signals that failed
+# ---------------------------------------------------------------------------
+
+class TestActivityEventLoggedPerFailedSelectedSignal(unittest.TestCase):
+    def test_analyst_failures_per_selected_signal_only(self) -> None:
+        """analyst_failures contains exactly one entry per failed selected signal.
+
+        Signals outside the review limit (not selected) must NOT appear in the list.
+        """
+        selected = _make_signal(0, score=90)
+        unselected = _make_signal(1, score=30)
+        review_context = {**_make_review_context([selected]), **_make_review_context([unselected])}
+        config = _make_config_minimal()
+
+        class FakeBrain:
+            def __init__(self, cfg):
+                self.last_error = "rate limit exceeded"
+
+            def available(self):
+                return True
+
+            def chat_json(self, system, user, schema=None, **kwargs):
+                return None
+
+        import signal_stream.analysis_tools as at
+        original = at.BrainClient
+        at.BrainClient = FakeBrain
+        try:
+            result, _, analyst_failures = _apply_analyst_mode(
+                [selected, unselected], config, "hybrid", "prompt",
+                # review_limit=1 so only `selected` is within scope.
+                {"analyst_full_review": True, "analyst_review_limit": 1,
+                 "analyst_review_batch_size": 1, "analyst_retry_max_attempts": 1,
+                 "model_score_adjustment_limit": 20, "summary_mode": "short_expanded",
+                 "entity_extraction": "hybrid"},
+                review_context,
+            )
+        finally:
+            at.BrainClient = original
+
+        failed_ids = {f["signal_id"] for f in analyst_failures}
+        self.assertIn(selected.id, failed_ids)
+        self.assertNotIn(unselected.id, failed_ids)
+
+
+# ---------------------------------------------------------------------------
+# Test 8: API exposes new fields via _hydrate_signal_row round-trip
+# ---------------------------------------------------------------------------
+
+class TestApiExposesNewFields(unittest.TestCase):
+    def test_new_fields_appear_in_hydrated_row(self) -> None:
+        """New analyst_status columns must flow through _hydrate_signal_row into the API dict."""
+        import tempfile, os
+
+        # Build a signal object with non-default values for the new columns.
+        sig = _make_signal(0, score=75)
+        sig.analyst_status = "failed"
+        sig.analyst_error_type = "rate_limit"
+        sig.analyst_error_message = "rate limit exceeded | short_body"
+        sig.analyst_attempt_count = 2
+        sig.analyst_last_attempt_at = "2026-01-01T12:00:00Z"
+        sig.analyst_artifact = None
+
+        # Persist via storage round-trip using a temp file DB.
+        fd, db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            storage = SignalStorage(db_path)
+            storage.init()
+            storage.save_run([
+                Article.from_fields("Test", sig.title, url=sig.url, body="body"),
+            ], [sig], cluster_count=1, output_path=".", started_at="2026-01-01T11:00:00Z")
+
+            hydrated = storage.get_signal(sig.id)
+        finally:
+            os.unlink(db_path)
+
+        self.assertIsNotNone(hydrated)
+        self.assertEqual(hydrated["analyst_status"], "failed")
+        self.assertEqual(hydrated["analyst_error_type"], "rate_limit")
+        self.assertIn("short_body", hydrated["analyst_error_message"])
+        self.assertEqual(hydrated["analyst_attempt_count"], 2)
+        self.assertEqual(hydrated["analyst_last_attempt_at"], "2026-01-01T12:00:00Z")
+
+
+# ---------------------------------------------------------------------------
+# Test 9: Editor excludes failed signals from briefing evidence
+# ---------------------------------------------------------------------------
+
+class TestEditorExcludesFailedFromEvidence(unittest.TestCase):
+    def test_failed_signal_not_in_briefing_payload(self) -> None:
+        """generate_briefing_from_artifacts must only pass success+artifact signals to Groq."""
+        good = _make_signal(0, score=90)
+        good.analyst_status = "success"
+        good.analyst_artifact = {"mechanism": "Good mechanism with plenty of detail.", "key_actors": [], "affected_parties": [], "evidence_excerpts": [], "confidence": "high", "confidence_reason": "primary"}
+
+        bad = _make_signal(1, score=70)
+        bad.analyst_status = "failed"
+        bad.analyst_artifact = None
+
+        received_payload = {}
+
+        class FakeBrain:
+            def chat_json(self, system, user, schema=None, **kwargs):
+                received_payload.update(json.loads(user))
+                return {"headline": "H", "briefing_paragraphs": ["p"], "cross_signal_narrative": "n"}
+
+        brain = FakeBrain()
+        generate_briefing_from_artifacts([good, bad], brain, "prompt", {})
+
+        # Only the good signal must appear in the signals array sent to Groq.
+        sent_ids = {s["id"] for s in received_payload.get("signals", [])}
+        self.assertIn(good.id, sent_ids)
+        self.assertNotIn(bad.id, sent_ids)
+
+
+# ---------------------------------------------------------------------------
+# Test 10: Signal JSON serialisation round-trips all new fields
+# ---------------------------------------------------------------------------
+
+class TestSignalJsonRoundTrip(unittest.TestCase):
+    def test_new_fields_survive_worker_boundary(self) -> None:
+        """Every new analyst_status field must survive _signal_json → _signal_from_json."""
+        sig = _make_signal(0, score=65)
+        sig.analyst_status = "failed"
+        sig.analyst_error_type = "invalid_json"
+        sig.analyst_error_message = "json decode error"
+        sig.analyst_attempt_count = 1
+        sig.analyst_last_attempt_at = "2026-05-14T10:00:00Z"
+        sig.analyst_artifact = None
+
+        serialized = _signal_json(sig)
+        recovered = _signal_from_json(serialized)
+
+        self.assertEqual(recovered.analyst_status, "failed")
+        self.assertEqual(recovered.analyst_error_type, "invalid_json")
+        self.assertEqual(recovered.analyst_error_message, "json decode error")
+        self.assertEqual(recovered.analyst_attempt_count, 1)
+        self.assertEqual(recovered.analyst_last_attempt_at, "2026-05-14T10:00:00Z")
+        self.assertIsNone(recovered.analyst_artifact)
+
+
+# ---------------------------------------------------------------------------
+# Test 11: Orphan sweep finalizes transient states from non-complete runs
+# ---------------------------------------------------------------------------
+
+class TestOrphanSweepFinalizes(unittest.TestCase):
+    def test_pending_retry_from_interrupted_run_becomes_failed(self) -> None:
+        """A pending_retry signal from an interrupted run must flip to failed on next init()."""
+        import tempfile, os, sqlite3 as _sqlite3
+
+        fd, db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            storage = SignalStorage(db_path)
+            storage.init()
+
+            now_ts = "2026-01-01T12:00:00Z"
+            earlier_ts = "2026-01-01T11:59:59Z"
+
+            # Insert an interrupted agent_run and a signal in pending_retry state.
+            with _sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    "insert into agent_runs (id, goal, status, started_at, completed_at) "
+                    "values (?, ?, ?, ?, ?)",
+                    ("run_orphan", "test", "interrupted", earlier_ts, now_ts),
+                )
+                conn.execute(
+                    "insert into signals "
+                    "(id, cluster_id, article_id, title, url, source, published_at, "
+                    "score, urgency, event_type, summary, analyst_status, created_at) "
+                    "values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    ("sig_orphan", "cl", "art_orphan", "Orphan", "", "Src", "",
+                     50, "medium", "general_signal", "body", "pending_retry", earlier_ts),
+                )
+
+            # Re-running init() triggers the orphan sweep.
+            storage.init()
+
+            with _sqlite3.connect(db_path) as conn:
+                conn.row_factory = _sqlite3.Row
+                row = conn.execute("select analyst_status from signals where id = 'sig_orphan'").fetchone()
+
+            self.assertEqual(row["analyst_status"], "failed")
+        finally:
+            os.unlink(db_path)
+
+
+# ---------------------------------------------------------------------------
+# Test 12: analyst_full_review=False marks selected signals as skipped
+# ---------------------------------------------------------------------------
+
+class TestFullReviewDisabledMarksSkipped(unittest.TestCase):
+    def test_skipped_when_full_review_disabled(self) -> None:
+        """When analyst_full_review is False, selected signals get analyst_status='skipped'."""
+        signals = [_make_signal(i, score=70 - i) for i in range(3)]
+        review_context = _make_review_context(signals)
+        config = _make_config_minimal()
+
+        class FakeBrain:
+            def __init__(self, cfg):
+                pass
+
+            def available(self):
+                return True
+
+        import signal_stream.analysis_tools as at
+        original = at.BrainClient
+        at.BrainClient = FakeBrain
+        try:
+            result, _, failures = _apply_analyst_mode(
+                signals, config, "hybrid", "prompt",
+                {"analyst_full_review": False, "analyst_review_limit": 5,
+                 "analyst_review_batch_size": 1, "analyst_retry_max_attempts": 1,
+                 "model_score_adjustment_limit": 20, "summary_mode": "short_expanded",
+                 "entity_extraction": "hybrid"},
+                review_context,
+            )
+        finally:
+            at.BrainClient = original
+
+        for sig in result[:3]:
+            self.assertEqual(sig.analyst_status, "skipped")
+            self.assertIsNone(sig.analyst_error_type)
+            self.assertEqual(sig.analyst_attempt_count, 0)
+        self.assertEqual(failures, [])
+
+
+# ---------------------------------------------------------------------------
+# Test 13: Unknown error format preserved verbatim in error_message
+# ---------------------------------------------------------------------------
+
+class TestRawErrorMessagePreservedOnUnknown(unittest.TestCase):
+    def test_raw_error_in_error_message_on_unknown_format(self) -> None:
+        """An unrecognised Groq error string must be stored verbatim so format drift is debuggable."""
+        signal = _make_signal(0, score=60)
+        review_context = _make_review_context([signal])
+        behavior = {"analyst_review_limit": 5, "analyst_review_batch_size": 1}
+        raw_error = "some new groq error format we haven't seen"
+
+        class FakeLLM:
+            last_error = raw_error
+
+            def chat_json(self, system, user, schema=None, **kwargs):
+                return None
+
+        llm = FakeLLM()
+        _, _, statuses = _review_signals_in_chunks(llm, "sys", [signal], behavior, review_context)
+
+        self.assertEqual(statuses[signal.id]["error_type"], "unknown")
+        self.assertIn(raw_error[:50], statuses[signal.id].get("error_message", ""))
 
 
 if __name__ == "__main__":

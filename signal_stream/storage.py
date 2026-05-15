@@ -138,6 +138,50 @@ class SignalStorage:
             _ensure_column(conn, "signals", "relevance_label", "text")
             # Per-signal analyst artifact (mechanism, key_actors, evidence, confidence, truncation meta).
             _ensure_column(conn, "signals", "analyst_artifact_json", "text")
+            # Per-signal Groq review tracking (Phase 3).
+            # analyst_status terminal values: success | failed | skipped.
+            # Transient within a run only: pending | pending_retry.
+            # analyst_attempt_count counts analyst-level review attempts, NOT
+            # BrainClient's internal HTTP retries inside a single chat_json call.
+            _ensure_column(conn, "signals", "analyst_status", "text")
+            _ensure_column(conn, "signals", "analyst_error_type", "text")
+            _ensure_column(conn, "signals", "analyst_error_message", "text")
+            _ensure_column(conn, "signals", "analyst_attempt_count", "integer")
+            _ensure_column(conn, "signals", "analyst_last_attempt_at", "text")
+            # One-shot backfill: set analyst_status for existing rows that have the
+            # new column but still hold the SQLite default (NULL).
+            # Idempotency guard: skip entirely if any row already has a non-NULL status,
+            # so this never runs twice (safe to re-execute on every startup).
+            guard = conn.execute(
+                "select 1 from signals where analyst_status is not null limit 1"
+            ).fetchone()
+            if not guard:
+                # artifact present → success; artifact NULL → pending (conservative —
+                # we can't prove old NULL rows were selected for Groq review).
+                conn.execute(
+                    "update signals set analyst_status = 'success' "
+                    "where analyst_artifact_json is not null"
+                )
+                conn.execute(
+                    "update signals set analyst_status = 'pending' "
+                    "where analyst_artifact_json is null"
+                )
+            # Orphan sweep: signals left in transient states by a killed or crashed run
+            # never had the terminal-finalization pass run. Flip them to 'failed' so no
+            # row sits in pending/pending_retry indefinitely after the run is gone.
+            conn.execute(
+                """
+                update signals
+                set analyst_status = 'failed',
+                    analyst_error_message = 'run interrupted before analyst finalization'
+                where analyst_status in ('pending', 'pending_retry')
+                  and article_id in (
+                      select s2.article_id from signals s2
+                      inner join agent_runs ar on ar.completed_at >= s2.created_at
+                      where ar.status != 'complete'
+                  )
+                """
+            )
             # Editor briefing columns on agent_runs.
             _ensure_column(conn, "agent_runs", "briefing_json", "text")
             _ensure_column(conn, "agent_runs", "briefing_status", "text")
@@ -179,9 +223,10 @@ class SignalStorage:
                     id, cluster_id, article_id, title, url, source, published_at, score, urgency, event_type,
                     summary, short_summary, expanded_summary, why_it_matters, next_steps_json, score_breakdown_json,
                     matched_priorities_json, entities_json, image_url, icon_key, scout_note, relevance_label,
-                    duplicate_count, analyst_artifact_json, created_at
+                    duplicate_count, analyst_artifact_json, analyst_status, analyst_error_type,
+                    analyst_error_message, analyst_attempt_count, analyst_last_attempt_at, created_at
                 )
-                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 on conflict(id) do update set
                     score=excluded.score,
                     urgency=excluded.urgency,
@@ -199,6 +244,11 @@ class SignalStorage:
                     relevance_label=excluded.relevance_label,
                     duplicate_count=excluded.duplicate_count,
                     analyst_artifact_json=excluded.analyst_artifact_json,
+                    analyst_status=excluded.analyst_status,
+                    analyst_error_type=excluded.analyst_error_type,
+                    analyst_error_message=excluded.analyst_error_message,
+                    analyst_attempt_count=excluded.analyst_attempt_count,
+                    analyst_last_attempt_at=excluded.analyst_last_attempt_at,
                     created_at=excluded.created_at
                 """,
                 [
@@ -229,6 +279,11 @@ class SignalStorage:
                         # Serialize artifact to JSON if present; null otherwise so old
                         # consumers that don't read this column stay unaffected.
                         json.dumps(signal.analyst_artifact, sort_keys=True) if signal.analyst_artifact else None,
+                        signal.analyst_status,
+                        signal.analyst_error_type,
+                        signal.analyst_error_message,
+                        signal.analyst_attempt_count,
+                        signal.analyst_last_attempt_at,
                         completed_at,
                     )
                     for signal in signals
@@ -306,9 +361,10 @@ class SignalStorage:
                     id, cluster_id, article_id, title, url, source, published_at, score, urgency, event_type,
                     summary, short_summary, expanded_summary, why_it_matters, next_steps_json, score_breakdown_json,
                     matched_priorities_json, entities_json, image_url, icon_key, scout_note, relevance_label,
-                    duplicate_count, analyst_artifact_json, created_at
+                    duplicate_count, analyst_artifact_json, analyst_status, analyst_error_type,
+                    analyst_error_message, analyst_attempt_count, analyst_last_attempt_at, created_at
                 )
-                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 on conflict(id) do update set
                     score=excluded.score,
                     urgency=excluded.urgency,
@@ -326,6 +382,11 @@ class SignalStorage:
                     relevance_label=excluded.relevance_label,
                     duplicate_count=excluded.duplicate_count,
                     analyst_artifact_json=excluded.analyst_artifact_json,
+                    analyst_status=excluded.analyst_status,
+                    analyst_error_type=excluded.analyst_error_type,
+                    analyst_error_message=excluded.analyst_error_message,
+                    analyst_attempt_count=excluded.analyst_attempt_count,
+                    analyst_last_attempt_at=excluded.analyst_last_attempt_at,
                     created_at=excluded.created_at
                 """,
                 [
@@ -355,6 +416,11 @@ class SignalStorage:
                         signal.duplicate_count,
                         # Persist artifact as JSON or null; the read path tolerates absence.
                         json.dumps(signal.analyst_artifact, sort_keys=True) if signal.analyst_artifact else None,
+                        signal.analyst_status,
+                        signal.analyst_error_type,
+                        signal.analyst_error_message,
+                        signal.analyst_attempt_count,
+                        signal.analyst_last_attempt_at,
                         completed_at,
                     )
                     for signal in signals
@@ -429,7 +495,9 @@ class SignalStorage:
                 """
                 select id, title, score, urgency, event_type, source, published_at, summary, short_summary,
                        expanded_summary, why_it_matters, url, score_breakdown_json, entities_json, image_url,
-                       icon_key, scout_note, relevance_label, analyst_artifact_json, created_at
+                       icon_key, scout_note, relevance_label, analyst_artifact_json, analyst_status,
+                       analyst_error_type, analyst_error_message, analyst_attempt_count,
+                       analyst_last_attempt_at, created_at
                 from signals
                 order by created_at desc, score desc
                 limit ?
@@ -499,7 +567,9 @@ class SignalStorage:
                 """
                 select id, title, score, urgency, event_type, source, published_at, summary, short_summary,
                        expanded_summary, why_it_matters, url, score_breakdown_json, entities_json, image_url,
-                       icon_key, scout_note, relevance_label, analyst_artifact_json, created_at
+                       icon_key, scout_note, relevance_label, analyst_artifact_json, analyst_status,
+                       analyst_error_type, analyst_error_message, analyst_attempt_count,
+                       analyst_last_attempt_at, created_at
                 from signals where id = ?
                 """,
                 (signal_id,),
@@ -612,6 +682,13 @@ class SignalStorage:
         item["image_url"] = item.get("image_url") or ""
         item["scout_note"] = item.get("scout_note") or ""
         item["relevance_label"] = item.get("relevance_label") or "keep"
+        # Analyst review status fields: safe defaults for rows created before this
+        # migration (legacy rows have NULL in these columns from the DB).
+        item["analyst_status"] = item.get("analyst_status") or "pending"
+        item["analyst_error_type"] = item.get("analyst_error_type")
+        item["analyst_error_message"] = item.get("analyst_error_message")
+        item["analyst_attempt_count"] = item.get("analyst_attempt_count") or 0
+        item["analyst_last_attempt_at"] = item.get("analyst_last_attempt_at")
         return item
 
     def update_signal_artifact(self, signal_id: str, artifact: dict[str, Any]) -> None:

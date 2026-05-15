@@ -44,7 +44,7 @@ class AgentBrainSettingsTest(unittest.TestCase):
             def available(self) -> bool:
                 return True
 
-            def chat_json(self, system, user, schema):  # noqa: ANN001
+            def chat_json(self, system, user, schema=None, **kwargs):  # noqa: ANN001
                 return {
                     "items": [
                         {
@@ -148,7 +148,7 @@ brain_file = "{brain_path}"
     def test_hybrid_analyst_uses_model_owned_short_summary(self) -> None:
         class FakeBrain:
             def __init__(self, config):  # noqa: ANN001
-                pass
+                self.last_error = None
 
             def available(self) -> bool:
                 return True
@@ -207,7 +207,7 @@ brain_file = "{brain_path}"
         analysis_tools.BrainClient = FakeBrain
         try:
             # Phase 2: _apply_analyst_mode now returns (signals, truncation_events).
-            updated_signals, _ = _apply_analyst_mode(
+            updated_signals, _, _ = _apply_analyst_mode(
                 [signal],
                 config,
                 "hybrid",
@@ -290,7 +290,7 @@ brain_file = "{brain_path}"
         analysis_tools.BrainClient = FakeBrain
         try:
             # Phase 2: _apply_analyst_mode now returns (signals, truncation_events).
-            updated_signals, _ = _apply_analyst_mode(
+            updated_signals, _, _ = _apply_analyst_mode(
                 [signal],
                 config,
                 "hybrid",
@@ -307,12 +307,12 @@ brain_file = "{brain_path}"
     def test_missing_batch_review_still_repairs_top_candidate_summary(self) -> None:
         class FakeBrain:
             def __init__(self, config):  # noqa: ANN001
-                pass
+                self.last_error = None
 
             def available(self) -> bool:
                 return True
 
-            def chat_json(self, system, user, schema):  # noqa: ANN001
+            def chat_json(self, system, user, schema=None, **kwargs):  # noqa: ANN001
                 if "review_ranked_signals" in user:
                     return None
                 return {
@@ -359,7 +359,7 @@ brain_file = "{brain_path}"
         analysis_tools.BrainClient = FakeBrain
         try:
             # Phase 2: _apply_analyst_mode now returns (signals, truncation_events).
-            updated_signals, _ = _apply_analyst_mode(
+            updated_signals, _, _ = _apply_analyst_mode(
                 [signal],
                 config,
                 "hybrid",
