@@ -1079,10 +1079,12 @@ class TestOrphanSweepFinalizes(unittest.TestCase):
                 conn.execute(
                     "insert into signals "
                     "(id, cluster_id, article_id, title, url, source, published_at, "
-                    "score, urgency, event_type, summary, analyst_status, created_at) "
-                    "values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "score, urgency, event_type, summary, analyst_status, "
+                    "analyst_last_attempt_at, created_at) "
+                    "values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     ("sig_orphan", "cl", "art_orphan", "Orphan", "", "Src", "",
-                     50, "medium", "general_signal", "body", "pending_retry", earlier_ts),
+                     50, "medium", "general_signal", "body", "pending_retry",
+                     earlier_ts, earlier_ts),  # analyst_last_attempt_at set → sweep should flip
                 )
 
             # Re-running init() triggers the orphan sweep.
@@ -1160,6 +1162,219 @@ class TestRawErrorMessagePreservedOnUnknown(unittest.TestCase):
 
         self.assertEqual(statuses[signal.id]["error_type"], "unknown")
         self.assertIn(raw_error[:50], statuses[signal.id].get("error_message", ""))
+
+
+# ---------------------------------------------------------------------------
+# Bug-fix tests — verified against the post-PR-1 code before patching
+# ---------------------------------------------------------------------------
+
+# Bug 1: Orphan sweep must NOT flip pending signals that never had a review attempt
+class TestOrphanSweepNoFalsePositives(unittest.TestCase):
+    def test_pending_no_attempt_not_flipped_by_orphan_sweep(self) -> None:
+        """pending signals with analyst_last_attempt_at=NULL must survive the sweep unchanged.
+
+        Regression guard: the orphan sweep's date-join previously matched backfill-assigned
+        pending signals (analyst_last_attempt_at=NULL) whenever any non-complete agent_run
+        had a completed_at >= the signal's created_at. On a DB with 403 pending signals and
+        24 non-complete runs spanning the date range, this flipped 375 rows to 'failed'.
+
+        The fix gates the sweep on analyst_last_attempt_at IS NOT NULL, so only signals that
+        actually started a Phase-3 review attempt can be swept as orphans.
+        """
+        import tempfile, os, sqlite3 as _sqlite3
+
+        fd, db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            storage = SignalStorage(db_path)
+            storage.init()
+
+            sig_ts = "2026-01-01T10:00:00Z"
+            # Non-complete run whose completed_at is >= signal's created_at — triggers the bad join.
+            interrupted_ts = "2026-01-01T12:00:00Z"
+
+            with _sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    "insert into agent_runs (id, goal, status, started_at, completed_at) "
+                    "values (?, ?, ?, ?, ?)",
+                    ("run_interrupted", "test", "interrupted", sig_ts, interrupted_ts),
+                )
+                conn.execute(
+                    "insert into signals "
+                    "(id, cluster_id, article_id, title, url, source, published_at, "
+                    "score, urgency, event_type, summary, analyst_status, "
+                    "analyst_last_attempt_at, created_at) "
+                    "values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    # analyst_last_attempt_at=NULL → backfill/code-mode row, never attempted
+                    ("sig_backfill", "cl", "art_backfill", "Backfill Signal", "", "Src", "",
+                     80, "medium", "general_signal", "body", "pending",
+                     None, sig_ts),
+                )
+
+            # Orphan sweep fires on re-init.
+            storage.init()
+
+            with _sqlite3.connect(db_path) as conn:
+                conn.row_factory = _sqlite3.Row
+                row = conn.execute(
+                    "select analyst_status from signals where id = 'sig_backfill'"
+                ).fetchone()
+
+            self.assertEqual(
+                row["analyst_status"], "pending",
+                "A pending signal with no attempt timestamp must not be flipped by the orphan sweep",
+            )
+        finally:
+            os.unlink(db_path)
+
+
+# Bug 2: Editor worker must preserve analyst_status through JSON boundary
+class TestEditorWorkerPreservesAnalystStatus(unittest.TestCase):
+    def test_success_signal_evidence_reaches_groq_via_worker(self) -> None:
+        """analyst_status='success' must survive handle_task rehydration so the signal is used as evidence.
+
+        Regression guard: handle_task('editor', ...) previously omitted the 5 Phase-3
+        fields from its _Signal(...) constructor, defaulting analyst_status to 'pending'
+        and causing _is_analyst_evidence to filter every signal out of evidence.
+        """
+        from signal_stream.worker import handle_task
+
+        good = _make_signal(0, score=90)
+        good.analyst_status = "success"
+        good.analyst_artifact = {
+            "mechanism": "A detailed mechanism with plenty of text to satisfy validation.",
+            "key_actors": [],
+            "affected_parties": [],
+            "evidence_excerpts": [],
+            "confidence": "high",
+            "confidence_reason": "primary",
+        }
+
+        # Serialize as agent_runtime does when dispatching to the editor worker.
+        good_dict = _signal_json(good)
+
+        received_payload: dict = {}
+
+        class FakeBrain:
+            def __init__(self, cfg):
+                pass
+
+            def chat_json(self, system, user, schema=None, **kwargs):
+                received_payload.update(json.loads(user))
+                return {
+                    "headline": "H",
+                    "briefing_paragraphs": ["paragraph"],
+                    "cross_signal_narrative": "narrative",
+                }
+
+        config = _make_config_minimal()
+        task = {
+            "task_id": "t_editor",
+            "type": "generate_briefing",
+            "payload": {"signals": [good_dict], "run_context": {}},
+        }
+
+        with patch("signal_stream.worker.BrainClient", FakeBrain):
+            handle_task("editor", config, MagicMock(), {"editor": "You are the editor."}, {}, {}, task)
+
+        sent_ids = {s["id"] for s in received_payload.get("signals", [])}
+        self.assertIn(
+            good.id, sent_ids,
+            "Success signal must appear in Groq evidence payload after worker-boundary rehydration",
+        )
+
+
+# Bug 3: list_signals_paged and list_signals_executive must expose new analyst columns
+class TestPagedAndExecutiveSelectsExposeAnalystStatus(unittest.TestCase):
+    def _persist_failed_signal(self, storage: "SignalStorage") -> "Signal":
+        sig = _make_signal(0, score=65)
+        sig.analyst_status = "failed"
+        sig.analyst_error_type = "rate_limit"
+        sig.analyst_error_message = "exceeded"
+        sig.analyst_attempt_count = 2
+        sig.analyst_last_attempt_at = "2026-01-01T12:00:00Z"
+        sig.analyst_artifact = None
+        storage.save_run(
+            [Article.from_fields("Src", sig.title, url=sig.url, body="body")],
+            [sig],
+            cluster_count=1,
+            output_path=".",
+            started_at="2026-01-01T11:00:00Z",
+        )
+        return sig
+
+    def test_list_signals_paged_returns_analyst_status(self) -> None:
+        """list_signals_paged must include analyst_status in each returned row."""
+        import tempfile, os
+
+        fd, db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            storage = SignalStorage(db_path)
+            storage.init()
+            sig = self._persist_failed_signal(storage)
+
+            page = storage.list_signals_paged()
+            items = page["items"]
+        finally:
+            os.unlink(db_path)
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(
+            items[0].get("analyst_status"), "failed",
+            "list_signals_paged must return analyst_status from the DB, not the hydration default",
+        )
+
+    def test_list_signals_executive_returns_analyst_status(self) -> None:
+        """list_signals_executive must include analyst_status in each returned row."""
+        import tempfile, os
+
+        fd, db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            storage = SignalStorage(db_path)
+            storage.init()
+            sig = self._persist_failed_signal(storage)
+
+            items = storage.list_signals_executive()
+        finally:
+            os.unlink(db_path)
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(
+            items[0].get("analyst_status"), "failed",
+            "list_signals_executive must return analyst_status from the DB, not the hydration default",
+        )
+
+
+# Bug 6: _signal_block must suppress raw body for failed/pending signals
+class TestSignalBlockSuppressesBodyForFailed(unittest.TestCase):
+    def test_failed_signal_raw_body_not_in_block(self) -> None:
+        """_signal_block must not emit short_summary/expanded_summary for failed signals.
+
+        Regression guard: the per-run .md digest file previously printed raw RSS bodies
+        (e.g. cookie banners) for signals that failed Groq review, because _signal_block
+        used short_summary unconditionally.
+        """
+        from signal_stream.analysis_tools import _signal_block
+
+        raw_body = "ACCEPT ALL COOKIES to continue browsing. Privacy policy. GDPR consent."
+        sig = _make_signal(0, score=60, body=raw_body)
+        sig.short_summary = raw_body
+        sig.expanded_summary = raw_body
+        sig.analyst_status = "failed"
+        sig.analyst_error_type = "rate_limit"
+
+        block = "\n".join(_signal_block(sig))
+
+        self.assertNotIn(
+            "ACCEPT ALL COOKIES", block,
+            "_signal_block must suppress raw RSS body for failed signals",
+        )
+        self.assertIn(
+            "Analyst review unavailable", block,
+            "_signal_block must include a fallback notice for failed signals",
+        )
 
 
 if __name__ == "__main__":

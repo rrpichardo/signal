@@ -198,7 +198,7 @@ def analyze_articles(
     # articles are fetched; the rest stay on their RSS bodies.
     review_limit = int(behavior.get("analyst_review_limit", 40))
     short_body_ids: set[str] = set()
-    if behavior.get("analyst_full_review"):
+    if behavior.get("analyst_full_review", True):
         signals, review_context, short_body_ids = _fetch_full_pages_for_top_n(signals, review_context, review_limit)
 
     signals, truncation_events, analyst_failures = _apply_analyst_mode(
@@ -1392,17 +1392,23 @@ def _signal_block(signal: Signal) -> list[str]:
     ]
     if signal.url:
         lines.append(f"- Link: {signal.url}")
-    lines.extend(
-        [
-            "",
-            f"Summary: {signal.short_summary or signal.summary}",
-            "",
-            f"Expanded summary: {signal.expanded_summary or signal.short_summary or signal.summary}",
-            "",
-            f"Why it matters: {signal.why_it_matters}",
-            "",
-        ]
-    )
+    if signal.analyst_status in ("failed", "pending", "pending_retry"):
+        # Suppress raw RSS body — may contain cookie banners or other junk from
+        # pages that Groq could not review. Show a neutral fallback instead.
+        error_note = f" ({signal.analyst_error_type})" if signal.analyst_error_type else ""
+        lines.extend(["", f"Analyst review unavailable{error_note}.", ""])
+    else:
+        lines.extend(
+            [
+                "",
+                f"Summary: {signal.short_summary or signal.summary}",
+                "",
+                f"Expanded summary: {signal.expanded_summary or signal.short_summary or signal.summary}",
+                "",
+                f"Why it matters: {signal.why_it_matters}",
+                "",
+            ]
+        )
     if signal.scout_note:
         lines.extend([f"Scout note: {signal.scout_note}", ""])
     lines.append("")

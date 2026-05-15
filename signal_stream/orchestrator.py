@@ -71,6 +71,9 @@ class SignalStreamOrchestrator:
                 expanded_summary=first_sentences(article.body, max_sentences=4, max_chars=600),
                 image_url=str(article.raw.get("image_url", "")),
                 icon_key=_icon_key(draft.event_type),
+                # Legacy orchestrator path does not run Groq review; mark explicitly
+                # so PR-2 UI shows code-mode signals correctly instead of as "failed".
+                analyst_status="skipped",
             ))
         signals.sort(key=lambda s: s.score, reverse=True)
 
