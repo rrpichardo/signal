@@ -197,10 +197,14 @@ def analyze_articles(
     # gets richer text than the RSS body alone. Only the top analyst_review_limit
     # articles are fetched; the rest stay on their RSS bodies.
     review_limit = int(behavior.get("analyst_review_limit", 40))
+    short_body_ids: set[str] = set()
     if behavior.get("analyst_full_review"):
-        signals, review_context = _fetch_full_pages_for_top_n(signals, review_context, review_limit)
+        signals, review_context, short_body_ids = _fetch_full_pages_for_top_n(signals, review_context, review_limit)
 
-    signals, truncation_events = _apply_analyst_mode(signals, config, analyst_mode, analyst_prompt, behavior, review_context)
+    signals, truncation_events, analyst_failures = _apply_analyst_mode(
+        signals, config, analyst_mode, analyst_prompt, behavior, review_context,
+        short_body_ids=short_body_ids,
+    )
     # Promote og:image for any signal that has no feed image but has a fetched og:image.
     # Runs in all modes — the og:image was already extracted during full-page fetch.
     _promote_og_images(signals, review_context)
@@ -214,6 +218,8 @@ def analyze_articles(
         # Phase 2: surface truncation events so the orchestrator can emit a
         # `truncated_article` activity event per affected signal.
         "truncation_events": truncation_events,
+        # Phase 3: per-signal Groq review failures for activity logging (selected signals only).
+        "analyst_failures": analyst_failures,
         "trace": [{"agent": event.agent, "message": event.message, "metadata": event.metadata} for event in trace.events],
     }
 
@@ -313,7 +319,49 @@ def _signal_json(signal: Signal) -> dict[str, Any]:
         # Phase 2: artifact rides on the signal dict through the worker stdout
         # and back into agent_runtime so save_run_atomic can persist it.
         "analyst_artifact": signal.analyst_artifact,
+        # Phase 3: review status tracking — also crosses the worker boundary.
+        "analyst_status": signal.analyst_status,
+        "analyst_error_type": signal.analyst_error_type,
+        "analyst_error_message": signal.analyst_error_message,
+        "analyst_attempt_count": signal.analyst_attempt_count,
+        "analyst_last_attempt_at": signal.analyst_last_attempt_at,
     }
+
+
+def _apply_model_updates(
+    signal: Signal,
+    item: dict[str, Any],
+    analyst_mode: str,
+    behavior: dict[str, Any],
+    config: SignalConfig,
+    llm: BrainClient,
+    analyst_prompt: str,
+    review_context: dict[str, dict[str, Any]],
+) -> None:
+    """Apply a successful Groq review result to a Signal in-place.
+
+    Shared by the first-pass and retry-pass success paths so the scoring,
+    summary, entity, and artifact logic stays in one place.
+    """
+    model_score = int(item.get("score", signal.score))
+    merged_score = _bounded_model_score(signal.score, model_score, analyst_mode, int(behavior.get("model_score_adjustment_limit", 20)))
+    signal.score = max(0, min(100, merged_score))
+    model_short = normalize_space(item.get("short_summary", ""))
+    if _looks_like_lazy_summary(model_short, signal.title):
+        repaired = _repair_lazy_summary(llm, analyst_prompt, signal, review_context.get(signal.id, {}), behavior)
+        model_short = repaired.get("short_summary", "")
+        if behavior.get("summary_mode") != "short_only" and repaired.get("expanded_summary"):
+            signal.expanded_summary = repaired["expanded_summary"]
+    signal.short_summary = model_short or signal.short_summary or signal.summary
+    if behavior.get("summary_mode") == "short_only":
+        signal.expanded_summary = ""
+    else:
+        signal.expanded_summary = normalize_space(item.get("expanded_summary", signal.expanded_summary or signal.short_summary)) or signal.expanded_summary or signal.short_summary
+    signal.summary = signal.short_summary
+    signal.why_it_matters = normalize_space(item.get("why_it_matters", signal.why_it_matters)) or signal.why_it_matters
+    signal.entities = _merge_entities(signal.entities, item.get("entities", {}), behavior)
+    signal.urgency = _urgency(signal.score, config.critical_threshold)
+    signal.analyst_artifact = _build_artifact(signal, item)
 
 
 def _apply_analyst_mode(
@@ -323,7 +371,8 @@ def _apply_analyst_mode(
     analyst_prompt: str,
     behavior: dict[str, Any],
     review_context: dict[str, dict[str, Any]],
-) -> tuple[list[Signal], list[dict[str, Any]]]:
+    short_body_ids: set[str] | None = None,
+) -> tuple[list[Signal], list[dict[str, Any]], list[dict[str, Any]]]:
     """Optionally let the model polish Analyst output.
 
     Plain English: the code still does the dependable base work first
@@ -332,25 +381,55 @@ def _apply_analyst_mode(
 
     Phase 2: also assembles the per-signal analyst_artifact and surfaces
     truncation_events for the orchestrator to log as activity events.
+
+    Phase 3: returns a third element — analyst_failures (list of dicts for activity
+    logging). Also writes analyst_status and related fields onto each Signal.
+    Terminal guarantee: no signal exits this function with analyst_status='pending_retry'.
     """
+    # Code path or brain unavailable: mark all signals as skipped (intentional non-model).
     if analyst_mode not in {"hybrid", "model"} or not signals:
-        return signals, []
+        for signal in signals:
+            signal.analyst_status = "skipped"
+        return signals, [], []
 
     llm = BrainClient(config)
     if not llm.available():
-        return signals, []
+        for signal in signals:
+            signal.analyst_status = "skipped"
+        return signals, [], []
 
-    truncation_events: list[dict[str, Any]] = []
-    if behavior.get("analyst_full_review"):
-        reviewed, truncation_events = _review_signals_in_chunks(llm, analyst_prompt, signals, behavior, review_context)
-    else:
-        reviewed = {}
-    updated = []
     review_limit = int(behavior.get("analyst_review_limit", 40))
+    truncation_events: list[dict[str, Any]] = []
+
+    # When analyst_full_review is disabled: mark selected signals as skipped
+    # (user deliberately turned off Groq review — not a failure).
+    # Default True: absent key means do the review; only explicit False skips it.
+    if not behavior.get("analyst_full_review", True):
+        for signal in signals[:review_limit]:
+            signal.analyst_status = "skipped"
+        return signals, [], []
+
+    # First pass: send top-N to Groq.
+    reviewed, truncation_events, statuses = _review_signals_in_chunks(
+        llm, analyst_prompt, signals, behavior, review_context, short_body_ids=short_body_ids
+    )
+
+    updated = []
     for index, signal in enumerate(signals):
         item = reviewed.get(signal.id)
         if not item:
-            if index < review_limit:
+            # Signal not reviewed: either out of review limit or Groq failed.
+            st = statuses.get(signal.id, {})
+            if index >= review_limit:
+                # Outside the review window — intentionally not attempted.
+                signal.analyst_status = "skipped"
+            else:
+                signal.analyst_status = st.get("status", "failed")
+                signal.analyst_error_type = st.get("error_type")
+                signal.analyst_error_message = st.get("error_message")
+                signal.analyst_attempt_count = 1 if signal.id in statuses else 0
+                signal.analyst_last_attempt_at = st.get("last_attempt_at")
+                # Lazy summary repair for text quality (does not change analyst_status).
                 repaired = _repair_lazy_summary(llm, analyst_prompt, signal, review_context.get(signal.id, {}), behavior)
                 if repaired.get("short_summary"):
                     signal.short_summary = repaired["short_summary"]
@@ -359,29 +438,61 @@ def _apply_analyst_mode(
                     signal.expanded_summary = repaired["expanded_summary"]
             updated.append(signal)
             continue
-        model_score = int(item.get("score", signal.score))
-        merged_score = _bounded_model_score(signal.score, model_score, analyst_mode, int(behavior.get("model_score_adjustment_limit", 20)))
-        signal.score = max(0, min(100, merged_score))
-        model_short = normalize_space(item.get("short_summary", ""))
-        if _looks_like_lazy_summary(model_short, signal.title):
-            repaired = _repair_lazy_summary(llm, analyst_prompt, signal, review_context.get(signal.id, {}), behavior)
-            model_short = repaired.get("short_summary", "")
-            if behavior.get("summary_mode") != "short_only" and repaired.get("expanded_summary"):
-                signal.expanded_summary = repaired["expanded_summary"]
-        signal.short_summary = model_short or signal.short_summary or signal.summary
-        if behavior.get("summary_mode") == "short_only":
-            signal.expanded_summary = ""
-        else:
-            signal.expanded_summary = normalize_space(item.get("expanded_summary", signal.expanded_summary or signal.short_summary)) or signal.expanded_summary or signal.short_summary
-        signal.summary = signal.short_summary
-        signal.why_it_matters = normalize_space(item.get("why_it_matters", signal.why_it_matters)) or signal.why_it_matters
-        signal.entities = _merge_entities(signal.entities, item.get("entities", {}), behavior)
-        signal.urgency = _urgency(signal.score, config.critical_threshold)
-        # Phase 2: assemble the per-signal artifact from the model response,
-        # apply Python's confidence overrides, and stamp truncation metadata.
-        signal.analyst_artifact = _build_artifact(signal, item)
+        # Success path.
+        signal.analyst_status = "success"
+        signal.analyst_attempt_count = 1
+        signal.analyst_last_attempt_at = statuses.get(signal.id, {}).get("last_attempt_at")
+        _apply_model_updates(signal, item, analyst_mode, behavior, config, llm, analyst_prompt, review_context)
         updated.append(signal)
-    return updated, truncation_events
+    signals = updated
+
+    # Second-pass retry: re-attempt signals marked pending_retry, sorted by score.
+    retry_max = int(behavior.get("analyst_retry_max_attempts", 1))
+    if retry_max > 0:
+        pending = sorted(
+            [s for s in signals if s.analyst_status == "pending_retry"],
+            key=lambda s: s.score,
+            reverse=True,
+        )
+        if pending:
+            reviewed2, _, statuses2 = _review_signals_in_chunks(
+                llm, analyst_prompt, pending, behavior, review_context, short_body_ids=short_body_ids
+            )
+            for signal in pending:
+                signal.analyst_attempt_count += 1
+                st2 = statuses2.get(signal.id, {})
+                signal.analyst_last_attempt_at = st2.get("last_attempt_at") or signal.analyst_last_attempt_at
+                item2 = reviewed2.get(signal.id)
+                if item2:
+                    signal.analyst_status = "success"
+                    signal.analyst_error_type = None
+                    signal.analyst_error_message = None
+                    _apply_model_updates(signal, item2, analyst_mode, behavior, config, llm, analyst_prompt, review_context)
+                else:
+                    # Cap at retry_max — no third pass.
+                    signal.analyst_status = "failed"
+                    signal.analyst_error_type = st2.get("error_type") or signal.analyst_error_type
+                    signal.analyst_error_message = st2.get("error_message") or signal.analyst_error_message
+
+    # Terminal finalization: no pending_retry must escape this function.
+    for signal in signals:
+        if signal.analyst_status == "pending_retry":
+            signal.analyst_status = "failed"
+
+    # Collect failures within the review window for activity logging (one event per signal).
+    analyst_failures = [
+        {
+            "signal_id": signal.id,
+            "title": signal.title,
+            "error_type": signal.analyst_error_type,
+            "error_message": signal.analyst_error_message,
+            "attempt_count": signal.analyst_attempt_count,
+        }
+        for signal in signals[:review_limit]
+        if signal.analyst_status == "failed"
+    ]
+
+    return signals, truncation_events, analyst_failures
 
 
 def _build_artifact(signal: Signal, item: dict[str, Any]) -> dict[str, Any]:
@@ -553,19 +664,25 @@ def _fetch_full_pages_for_top_n(
     signals: list[Signal],
     review_context: dict[str, dict[str, Any]],
     top_n: int,
-) -> tuple[list[Signal], dict[str, dict[str, Any]]]:
+) -> tuple[list[Signal], dict[str, dict[str, Any]], set[str]]:
     """Replace article_text in review_context with the full page body for the top-N signals.
 
     Side-effect: if og:image is found, it is written into review_context so
     _apply_analyst_mode can propagate it to signal.image_url (Wave 5 wires this up fully).
     Falls back to the RSS body already in review_context when extraction fails or is too short.
+
+    Phase 3: also returns short_body_ids — set of signal IDs where extraction yielded
+    < _FULL_PAGE_MIN_CHARS. The reviewer loop appends 'short_body' to error_message for
+    those signals when Groq review also fails, so the cause is visible without a new column.
     """
+    short_body_ids: set[str] = set()
     for signal in signals[:top_n]:
         ctx = dict(review_context.get(signal.id, {}))
         body, og_image = fetch_full_article_page(signal.url)
         if len(body) >= _FULL_PAGE_MIN_CHARS:
             ctx["article_text"] = body
         else:
+            short_body_ids.add(signal.id)
             if body:  # non-empty but short — log for visibility
                 print(
                     f"[signal_stream] fetch_full_article_page: extraction yielded <{_FULL_PAGE_MIN_CHARS} chars for {signal.url!r}; using RSS body.",
@@ -574,7 +691,7 @@ def _fetch_full_pages_for_top_n(
         if og_image:
             ctx["og_image"] = og_image
         review_context[signal.id] = ctx
-    return signals, review_context
+    return signals, review_context, short_body_ids
 
 
 def _chat_json_with_truncation_fallback(
@@ -607,7 +724,10 @@ def _chat_json_with_truncation_fallback(
     if raw is not None:
         return raw, truncation_info
     last_err = (llm.last_error or "").lower()
-    if not any(kw in last_err for kw in ("context", "too large", "length", "token", "limit")):
+    # CAUTION: keep these specific to context-size errors. Do NOT include "limit"
+    # or "token" — those appear in rate-limit errors ("rate limit exceeded",
+    # "Hit Groq rate limit three times") and would trigger an unnecessary retry.
+    if not any(kw in last_err for kw in ("context", "too large", "length")):
         return None, truncation_info
     # Parse payload, truncate article_text, retry once.
     try:
@@ -657,7 +777,8 @@ def _review_signals_in_chunks(
     signals: list[Signal],
     behavior: dict[str, Any],
     review_context: dict[str, dict[str, Any]],
-) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    short_body_ids: set[str] | None = None,
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], dict[str, dict[str, Any]]]:
     """Review top signals one-per-Groq-request.
 
     Plain English: batch_size=1 sends each article to Groq individually. This is
@@ -669,13 +790,22 @@ def _review_signals_in_chunks(
     of {signal_id, chars_total, chars_sent} dicts surfaced for activity logging.
     The reviewed dict embeds the same info under each signal's "_truncation" key
     so the artifact builder can stamp it into _meta.
-    """
 
+    Phase 3: also returns statuses dict {signal_id: {status, error_type, error_message,
+    last_attempt_at}}. attempt_count in statuses is always 1 per call to this function
+    — callers accumulate across passes. 'short_body_ids' is the set of signal IDs where
+    full-page extraction yielded short text; 'short_body' is appended to error_message
+    for those signals when Groq also fails, so the compound cause is visible.
+    """
+    from datetime import datetime, timezone
     limit = int(behavior.get("analyst_review_limit", 40))
     batch_size = max(1, int(behavior.get("analyst_review_batch_size", 1)))
     candidates = signals[:limit]
     reviewed: dict[str, dict[str, Any]] = {}
     truncation_events: list[dict[str, Any]] = []
+    statuses: dict[str, dict[str, Any]] = {}
+    now_iso = datetime.now(timezone.utc).isoformat()
+
     for index in range(0, len(candidates), batch_size):
         chunk = candidates[index : index + batch_size]
         payload = {
@@ -701,8 +831,40 @@ def _review_signals_in_chunks(
             required_fields=None,
         )
         if raw is None:
+            # Classify error type by inspecting llm.last_error.
+            # CAUTION: substring matching is fragile against Groq error format changes.
+            # The raw last_error string is always stored in error_message so format
+            # shifts surface as 'unknown' with the actual text still visible for debugging.
+            raw_error = (llm.last_error or "").lower()
+            if any(kw in raw_error for kw in ("rate limit", "three times", "429")):
+                error_type = "rate_limit"
+                review_status = "pending_retry"
+            elif "timeout" in raw_error:
+                error_type = "timeout"
+                review_status = "pending_retry"
+            elif any(kw in raw_error for kw in ("json", "decode")):
+                error_type = "invalid_json"
+                review_status = "failed"
+            elif any(kw in raw_error for kw in ("context", "length")):
+                error_type = "extraction_failed"
+                review_status = "failed"
+            else:
+                error_type = "unknown"
+                review_status = "failed"
+
+            for signal in chunk:
+                # Always store the raw error text (capped) so future format shifts are debuggable.
+                short_note = " | short_body" if short_body_ids and signal.id in short_body_ids else ""
+                error_msg = (llm.last_error or "")[:200] + short_note
+                statuses[signal.id] = {
+                    "status": review_status,
+                    "error_type": error_type,
+                    "error_message": error_msg,
+                    "last_attempt_at": now_iso,
+                }
             print(
-                f"[signal_stream] Groq review failed for signal index {index} (required fields missing or error); skipping.",
+                f"[signal_stream] Groq review failed for signal index {index} "
+                f"({error_type}); marking as {review_status}.",
                 file=sys.stderr,
             )
             continue
@@ -713,6 +875,12 @@ def _review_signals_in_chunks(
             # downstream can fold it into _meta without re-plumbing.
             item["_truncation"] = dict(trunc_info)
             reviewed[item["id"]] = item
+            statuses[item["id"]] = {
+                "status": "success",
+                "error_type": None,
+                "error_message": None,
+                "last_attempt_at": now_iso,
+            }
             # Only surface a truncation_event when the fallback actually fired —
             # one event per signal in the truncated chunk so the activity log
             # shows which articles got cut down.
@@ -722,7 +890,7 @@ def _review_signals_in_chunks(
                     "chars_total": int(trunc_info.get("chars_total", 0)),
                     "chars_sent": int(trunc_info.get("chars_sent", 0)),
                 })
-    return reviewed, truncation_events
+    return reviewed, truncation_events, statuses
 
 
 def _review_payload(signal: Signal, context: dict[str, Any]) -> dict[str, Any]:

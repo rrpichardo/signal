@@ -169,6 +169,9 @@ model_score_adjustment_limit = 20
 analyst_review_limit = 40
 analyst_review_batch_size = 1
 analyst_full_review = true
+# How many times to retry a signal whose first Groq review fails with a rate-limit
+# or timeout error. 0 = no retry. Capped at 1 to keep runtime bounded.
+analyst_retry_max_attempts = 1
 executive_summary_limit = 12
 # Minimum signal score (0-100) the latest run must produce to refresh the
 # Intelligence Briefing on the Digest page. If no signal clears this floor,

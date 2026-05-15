@@ -57,6 +57,7 @@ def _make_signal(
         scout_note="",
         relevance_label="",
         analyst_artifact=artifact,
+        analyst_status="success",
     )
 
 

@@ -283,6 +283,16 @@ class SignalAgentRuntime:
                             f"Article truncated for Groq review (signal {trunc.get('signal_id')}).",
                             trunc,
                         )
+                    # One event per failed selected signal so the activity log
+                    # surfaces exactly which reviews Groq couldn't complete.
+                    for failure in list(state["analysis"].get("analyst_failures", [])):
+                        self.storage.save_agent_event(
+                            run_id,
+                            "Analyst",
+                            "groq_review_failed",
+                            f"Groq review failed for '{failure.get('title', '?')}' ({failure.get('error_type', 'unknown')}).",
+                            failure,
+                        )
                     # Safety net: if the Critic has exhausted its revision rounds and
                     # the LLM keeps choosing analyze_articles instead of critique_digest,
                     # ship the best signals now rather than burning iterations until
@@ -671,4 +681,11 @@ def _signal_from_json(item: dict[str, Any]) -> Signal:
         scout_note=str(item.get("scout_note", "")),
         relevance_label=str(item.get("relevance_label", "")),
         analyst_artifact=artifact,
+        # Phase 3: review status fields — default to safe values when missing from
+        # older worker output so deserialization never fails on a partial result.
+        analyst_status=str(item.get("analyst_status") or "pending"),
+        analyst_error_type=item.get("analyst_error_type") or None,
+        analyst_error_message=item.get("analyst_error_message") or None,
+        analyst_attempt_count=int(item.get("analyst_attempt_count") or 0),
+        analyst_last_attempt_at=item.get("analyst_last_attempt_at") or None,
     )

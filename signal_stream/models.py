@@ -169,6 +169,15 @@ class Signal:
     # confidence, truncation metadata, etc. None when the model review didn't
     # populate it (old rows, code-path runs, brain unavailable).
     analyst_artifact: dict[str, Any] | None = None
+    # Phase 3: per-signal Groq review status tracking.
+    # Terminal values persisted to DB: success | failed | skipped.
+    # Transient (within a run only): pending | pending_retry.
+    # analyst_attempt_count counts analyst-level passes, not BrainClient HTTP retries.
+    analyst_status: str = "pending"
+    analyst_error_type: str | None = None
+    analyst_error_message: str | None = None
+    analyst_attempt_count: int = 0
+    analyst_last_attempt_at: str | None = None
 
 
 @dataclass

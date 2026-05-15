@@ -62,6 +62,19 @@ def _parse_artifact(sig: Signal) -> dict[str, Any] | None:
     return artifact if isinstance(artifact, dict) else None
 
 
+def _is_analyst_evidence(sig: Signal) -> bool:
+    """True only when this signal has a confirmed Groq artifact — the north-star invariant.
+
+    Both conditions must hold: status must be 'success' AND the artifact dict must
+    be present. A success status with a NULL artifact (or vice versa) is a bug —
+    this guard rejects both halves so neither leaks into briefing prose.
+    """
+    return (
+        getattr(sig, "analyst_status", None) == "success"
+        and _parse_artifact(sig) is not None
+    )
+
+
 def _is_thin(artifact: dict[str, Any]) -> bool:
     """True when the artifact's mechanism is too short to be useful in a briefing."""
     mechanism = str(artifact.get("mechanism") or "").strip()
@@ -121,12 +134,17 @@ def generate_briefing_from_artifacts(
     if not top_signals:
         raise RuntimeError("No signals provided to generate briefing from.")
 
+    # Only analyst-confirmed signals contribute evidence to briefing prose.
+    # Signals with failed/pending/skipped status are excluded so raw RSS text
+    # or cookie banners never flow into the executive briefing.
+    evidence_signals = [s for s in top_signals if _is_analyst_evidence(s)]
+
     cov = _coverage(top_signals)
     payload = {
         "task": "generate_executive_briefing",
         "run_context": run_context,
         "coverage": cov,
-        "signals": [_build_signal_block(sig) for sig in top_signals],
+        "signals": [_build_signal_block(sig) for sig in evidence_signals],
     }
 
     raw = brain.chat_json(editor_prompt, json.dumps(payload, sort_keys=True), EDITOR_BRIEFING_SCHEMA)
@@ -136,7 +154,7 @@ def generate_briefing_from_artifacts(
     briefing = dict(raw)
     # Attach provenance fields so the dashboard and storage can trace the output.
     briefing["source_signal_ids"] = [sig.id for sig in top_signals]
-    briefing["input_artifact_count"] = len(top_signals)
+    briefing["input_artifact_count"] = len(evidence_signals)
     briefing["artifact_coverage"] = cov["artifact_coverage"]
     briefing["any_artifact_truncated"] = cov["any_artifact_truncated"]
     briefing["generated_at"] = datetime.now(timezone.utc).isoformat()
