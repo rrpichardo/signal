@@ -184,6 +184,13 @@ def handle_task(
                 scout_note=str(s.get("scout_note", "")),
                 relevance_label=str(s.get("relevance_label", "")),
                 analyst_artifact=s.get("analyst_artifact") if isinstance(s.get("analyst_artifact"), dict) else None,
+                # Phase-3 fields must cross the worker→runtime boundary so that
+                # _is_analyst_evidence can correctly gate briefing evidence on success rows.
+                analyst_status=str(s.get("analyst_status", "pending")),
+                analyst_error_type=s.get("analyst_error_type"),
+                analyst_error_message=s.get("analyst_error_message"),
+                analyst_attempt_count=int(s.get("analyst_attempt_count", 0)),
+                analyst_last_attempt_at=s.get("analyst_last_attempt_at"),
             )
             for s in top_signals_raw
         ]

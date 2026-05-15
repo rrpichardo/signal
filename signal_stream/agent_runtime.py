@@ -400,6 +400,10 @@ class SignalAgentRuntime:
                 for signal in exec_signals:
                     # Memory is how Signal Stream avoids acting like every day is day
                     # one. Future runs can see these saved topics and downgrade repeats.
+                    # Skip failed/pending signals — their summaries may be raw RSS
+                    # fallbacks (cookie banners, etc.) that should not enter memory.
+                    if signal.analyst_status not in ("success", "skipped"):
+                        continue
                     self.storage.save_memory_for_signal(signal)
             else:
                 # max_iterations was reached without the Orchestrator deciding to

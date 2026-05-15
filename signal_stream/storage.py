@@ -169,12 +169,17 @@ class SignalStorage:
             # Orphan sweep: signals left in transient states by a killed or crashed run
             # never had the terminal-finalization pass run. Flip them to 'failed' so no
             # row sits in pending/pending_retry indefinitely after the run is gone.
+            # Guard: analyst_last_attempt_at IS NOT NULL — only signals that actually
+            # started a Phase-3 review attempt can be orphans. Backfill-assigned
+            # 'pending' rows (last_attempt_at=NULL) must not be touched, or a fresh
+            # DB migration would mass-flip historical signals to 'failed'.
             conn.execute(
                 """
                 update signals
                 set analyst_status = 'failed',
                     analyst_error_message = 'run interrupted before analyst finalization'
                 where analyst_status in ('pending', 'pending_retry')
+                  and analyst_last_attempt_at is not null
                   and article_id in (
                       select s2.article_id from signals s2
                       inner join agent_runs ar on ar.completed_at >= s2.created_at
@@ -538,7 +543,9 @@ class SignalStorage:
         query = """
             select id, title, score, urgency, event_type, source, published_at, summary, short_summary,
                    expanded_summary, why_it_matters, url, score_breakdown_json, entities_json, image_url,
-                   icon_key, scout_note, relevance_label, analyst_artifact_json, created_at
+                   icon_key, scout_note, relevance_label, analyst_artifact_json,
+                   analyst_status, analyst_error_type, analyst_error_message,
+                   analyst_attempt_count, analyst_last_attempt_at, created_at
             from signals
         """
         params: list[Any] = []
@@ -590,7 +597,9 @@ class SignalStorage:
         query = """
             select id, title, score, urgency, event_type, source, published_at, summary, short_summary,
                    expanded_summary, why_it_matters, url, score_breakdown_json, entities_json, image_url,
-                   icon_key, scout_note, relevance_label, analyst_artifact_json, created_at
+                   icon_key, scout_note, relevance_label, analyst_artifact_json,
+                   analyst_status, analyst_error_type, analyst_error_message,
+                   analyst_attempt_count, analyst_last_attempt_at, created_at
             from signals
         """
         params: list[Any] = []
