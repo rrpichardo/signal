@@ -1,6 +1,6 @@
-"""Wave 3 scoring rubric tests.
+"""Signal Stream scoring rubric tests.
 
-Covers: 5-component scoring, 7 priority groups, event-type preservation,
+Covers: Richard Signal Score V2, 7 priority groups, event-type preservation,
 single score-source invariant, and RelevanceAgent deletion.
 """
 
@@ -18,7 +18,7 @@ from signal_stream.analysis_tools import (
     build_drafts_from_insights,
 )
 from signal_stream.config import load_config
-from signal_stream.models import Article, Cluster, ClusterInsight, Priority, SignalDraft
+from signal_stream.models import Article, Cluster, ClusterInsight, Priority, SignalDraft, utc_now_iso
 from signal_stream.prompt_loader import DEFAULT_SCORING_RUBRIC
 
 
@@ -142,6 +142,85 @@ class TestNvidiaInfrastructure(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Test: Richard Signal Score V2 behavior
+# ---------------------------------------------------------------------------
+
+class TestRichardSignalScoreV2(unittest.TestCase):
+    def test_inference_cost_story_scores_as_must_read(self) -> None:
+        article = _make_article(
+            "NVIDIA announces lower inference cost for enterprise AI workloads",
+            body=(
+                "NVIDIA announced a new inference platform with 10x throughput, "
+                "lower latency, API pricing changes, and enterprise customers using it "
+                "for agent workloads."
+            ),
+            published_at=utc_now_iso(),
+        )
+        article.source = "Reuters"
+        article.url = "https://www.reuters.com/technology/nvidia-inference-cost"
+        draft = _make_draft(
+            article,
+            event_type="infrastructure_signal",
+            competitors=["NVIDIA"],
+            matched_priorities=[
+                {"name": "AI Infrastructure, Chips, And Inference", "hits": ["NVIDIA", "inference", "cost"], "raw_count": 8, "weight": 2.8}
+            ],
+        )
+
+        score, breakdown = _base_score_card(article, draft, DEFAULT_SCORING_RUBRIC)
+
+        self.assertGreaterEqual(score, 85)
+        names = {item["name"] for item in breakdown}
+        self.assertIn("Trust penalty", names)
+        self.assertIn("Score band", names)
+
+    def test_promo_event_registration_is_hard_capped(self) -> None:
+        article = _make_article(
+            "Register now for the ultimate AI leadership conference",
+            body="Sponsored webinar with early bird tickets and a limited time discount.",
+            published_at=utc_now_iso(),
+        )
+        draft = _make_draft(article, event_type="general_signal")
+
+        score, breakdown = _base_score_card(article, draft, DEFAULT_SCORING_RUBRIC)
+
+        self.assertLessEqual(score, 25)
+        self.assertIn("Hard cap", {item["name"] for item in breakdown})
+
+    def test_single_source_sensational_claim_is_capped(self) -> None:
+        article = _make_article(
+            "SHOCKING truth about OpenAI governance they don't want you to know!",
+            body="Anonymous insiders say a secret collapse is coming and AI will change everything.",
+            published_at=utc_now_iso(),
+        )
+        article.source = "Unknown"
+        draft = _make_draft(
+            article,
+            event_type="general_signal",
+            competitors=["OpenAI"],
+            matched_priorities=[
+                {"name": "AI Regulation, Safety, Copyright, And Platform Risk", "hits": ["governance"], "raw_count": 3, "weight": 1.7}
+            ],
+        )
+
+        score, _breakdown = _base_score_card(article, draft, DEFAULT_SCORING_RUBRIC)
+
+        self.assertLessEqual(score, 60)
+
+    def test_generic_tutorial_is_capped_below_strategic_signals(self) -> None:
+        article = _make_article(
+            "How to build a RAG chatbot: beginner tutorial",
+            body="A step by step guide with generic tips and the best AI tools for a demo chatbot.",
+            published_at=utc_now_iso(),
+        )
+        draft = _make_draft(article, event_type="builder_tactic")
+
+        score, _breakdown = _base_score_card(article, draft, DEFAULT_SCORING_RUBRIC)
+
+        self.assertLessEqual(score, 45)
+
+
+# ---------------------------------------------------------------------------
 # Test: _base_score_card is the only score source (agentic path)
 # ---------------------------------------------------------------------------
 
@@ -259,15 +338,21 @@ class TestEventTypeClassificationPreserved(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Test: component max values sum to exactly 100
+# Test: V2 scoring weights are normalized
 # ---------------------------------------------------------------------------
 
-class TestComponentsSumTo100(unittest.TestCase):
-    def test_components_sum_to_100(self) -> None:
-        """The 5 component max-point values must sum to exactly 100."""
-        components = DEFAULT_SCORING_RUBRIC["components"]
-        total = sum(components.values())
-        self.assertEqual(total, 100, f"Component max values sum to {total}, expected 100. Values: {components}")
+class TestScoringWeightsNormalized(unittest.TestCase):
+    def test_value_weights_sum_to_20(self) -> None:
+        """Six 1-5 dimensions need weights summing to 20 for a 100-point value score."""
+        weights = DEFAULT_SCORING_RUBRIC["value_weights"]
+        total = sum(weights.values())
+        self.assertEqual(total, 20, f"Value weights sum to {total}, expected 20. Values: {weights}")
+
+    def test_trust_weights_sum_to_1(self) -> None:
+        """Trust deficit weights need to sum to 1 before the penalty scale is applied."""
+        weights = DEFAULT_SCORING_RUBRIC["trust_weights"]
+        total = sum(weights.values())
+        self.assertAlmostEqual(total, 1.0, msg=f"Trust weights sum to {total}, expected 1.0. Values: {weights}")
 
     def test_each_band_section_has_expected_keys(self) -> None:
         """Each band section must be present and non-empty in the default rubric."""
@@ -277,6 +362,7 @@ class TestComponentsSumTo100(unittest.TestCase):
             "priority_match_bands",
             "company_match_bands",
             "corroboration_bands",
+            "hard_caps",
         ]
         for section in expected_sections:
             self.assertIn(section, DEFAULT_SCORING_RUBRIC, f"Missing section: {section}")

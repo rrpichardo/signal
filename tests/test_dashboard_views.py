@@ -263,34 +263,36 @@ def test_old_signal_without_artifact_returns_null():
 # ---------------------------------------------------------------------------
 
 def test_settings_save_validates_component_weights_sum_100():
-    """save_brain_file must raise ValueError when component weights don't sum to 100."""
+    """save_brain_file must raise ValueError when V2 value weights don't sum to 20."""
     with tempfile.TemporaryDirectory() as tmpdir:
         brain_path = Path(tmpdir) / "brain.toml"
         # Write a brain file with valid starting weights so the path exists.
         valid_brain = {
             "scoring": {
-                "components": {
-                    "priority_match": 25,
-                    "company_match": 25,
-                    "recency": 15,
-                    "event_strength": 25,
-                    "corroboration": 10,
+                "value_weights": {
+                    "relevance_to_richard": 5,
+                    "strategic_importance": 5,
+                    "actionability": 3,
+                    "credibility": 3,
+                    "novelty": 2,
+                    "time_sensitivity": 2,
                 }
             }
         }
         save_brain_file(brain_path, valid_brain)
 
-        # Now try to save an invalid set that sums to 90 instead of 100.
+        # Now try to save an invalid set that sums to 18 instead of 20.
         bad_brain = {
             "scoring": {
-                "components": {
-                    "priority_match": 20,  # -5 here
-                    "company_match": 25,
-                    "recency": 15,
-                    "event_strength": 20,  # -5 here too → sum = 90
-                    "corroboration": 10,
+                "value_weights": {
+                    "relevance_to_richard": 4,
+                    "strategic_importance": 4,
+                    "actionability": 3,
+                    "credibility": 3,
+                    "novelty": 2,
+                    "time_sensitivity": 2,
                 }
             }
         }
-        with pytest.raises(ValueError, match="100"):
+        with pytest.raises(ValueError, match="20"):
             save_brain_file(brain_path, bad_brain)

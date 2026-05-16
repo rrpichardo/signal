@@ -22,10 +22,11 @@ class AgentBrainSettingsTest(unittest.TestCase):
                 {
                     "behavior": {"relevance_policy": "soft_keep", "model_score_adjustment_limit": 20},
                     "prompts": {"scout": "Scout test prompt"},
-                    # Wave 3: new 5-component rubric keys replace old max_points/freshness
+                    # Richard Signal Score V2: value and trust weights round-trip.
                     "scoring": {
-                        "priority_match_bands": {"direct_high_impact": 30},
-                        "recency_bands": {"within_1_day": 20},
+                        "value_weights": {"relevance_to_richard": 4.5, "strategic_importance": 5.5},
+                        "trust_weights": {"claim_support_deficit": 0.55, "hype_or_manipulation_deficit": 0.25, "source_credibility_deficit": 0.20},
+                        "trust_penalty": {"scale": 0.30},
                     },
                 },
             )
@@ -36,8 +37,10 @@ class AgentBrainSettingsTest(unittest.TestCase):
             self.assertEqual(brain["behavior"]["analyst_review_limit"], 40)
             self.assertEqual(brain["prompts"]["scout"], "Scout test prompt")
             # New scoring keys round-trip correctly
-            self.assertEqual(brain["scoring"]["priority_match_bands"]["direct_high_impact"], 30)
-            self.assertEqual(brain["scoring"]["recency_bands"]["within_1_day"], 20)
+            self.assertEqual(brain["scoring"]["value_weights"]["relevance_to_richard"], 4.5)
+            self.assertEqual(brain["scoring"]["value_weights"]["strategic_importance"], 5.5)
+            self.assertEqual(brain["scoring"]["trust_weights"]["claim_support_deficit"], 0.55)
+            self.assertEqual(brain["scoring"]["trust_penalty"]["scale"], 0.30)
 
     def test_scout_soft_keep_keeps_model_labeled_drop_items(self) -> None:
         class FakeLLM:
@@ -70,8 +73,8 @@ class AgentBrainSettingsTest(unittest.TestCase):
         self.assertEqual(_bounded_model_score(60, 10, "hybrid", 20), 40)
         self.assertEqual(_bounded_model_score(60, 95, "model", 20), 95)
 
-    def test_score_card_uses_5_components_and_no_repeat_penalty(self) -> None:
-        """Wave 3: _base_score_card uses the 5-component rubric with no memory/repeat penalty."""
+    def test_score_card_uses_v2_dimensions_and_no_repeat_penalty(self) -> None:
+        """_base_score_card uses V2 value/trust dimensions with no memory/repeat penalty."""
 
         class FakeCluster:
             articles = [Article.from_fields(source="Test", title="Repeat story", body="AI platform news")]
@@ -91,13 +94,15 @@ class AgentBrainSettingsTest(unittest.TestCase):
             load_brain_file(None)["scoring"],
         )
 
-        # The 5 expected component names
+        # The V2 expected component names
         names = {item["name"] for item in breakdown}
-        self.assertIn("Priority match", names)
-        self.assertIn("Company match", names)
-        self.assertIn("Recency", names)
-        self.assertIn("Event strength", names)
-        self.assertIn("Corroboration", names)
+        self.assertIn("Relevance to Richard", names)
+        self.assertIn("Strategic importance", names)
+        self.assertIn("Actionability", names)
+        self.assertIn("Credibility", names)
+        self.assertIn("Novelty", names)
+        self.assertIn("Time sensitivity", names)
+        self.assertIn("Trust penalty", names)
 
         # No repeat penalty or freshness line
         self.assertNotIn("Repeat penalty", names)
