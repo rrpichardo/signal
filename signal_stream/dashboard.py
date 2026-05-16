@@ -569,12 +569,16 @@ LEGACY_DASHBOARD_HTML = """<!doctype html>
         </div>
         <div class="card">
           <h3>Scoring</h3>
-          <label>Priority match max points</label><input id="score_priority_match" type="number">
-          <label>Major-player max points</label><input id="score_major_player" type="number">
-          <label>Corroboration max points</label><input id="score_corroboration" type="number">
-          <label>Repeat penalty max points</label><input id="score_repeat_penalty" type="number">
-          <label>Low-value penalty max points</label><input id="score_low_value_penalty" type="number">
-          <label>Low-value phrases</label><textarea id="low_value_phrases"></textarea>
+          <label>Relevance multiplier</label><input id="score_weight_relevance_to_richard" type="number" step="0.1">
+          <label>Strategic importance multiplier</label><input id="score_weight_strategic_importance" type="number" step="0.1">
+          <label>Actionability multiplier</label><input id="score_weight_actionability" type="number" step="0.1">
+          <label>Credibility multiplier</label><input id="score_weight_credibility" type="number" step="0.1">
+          <label>Novelty multiplier</label><input id="score_weight_novelty" type="number" step="0.1">
+          <label>Time sensitivity multiplier</label><input id="score_weight_time_sensitivity" type="number" step="0.1">
+          <label>Claim support deficit weight</label><input id="score_trust_claim_support_deficit" type="number" step="0.01">
+          <label>Hype/manipulation deficit weight</label><input id="score_trust_hype_or_manipulation_deficit" type="number" step="0.01">
+          <label>Source credibility deficit weight</label><input id="score_trust_source_credibility_deficit" type="number" step="0.01">
+          <label>Trust penalty scale</label><input id="score_trust_penalty_scale" type="number" step="0.01" min="0" max="1">
         </div>
       </div>
       <div class="card" style="margin-top:14px">
@@ -705,11 +709,16 @@ LEGACY_DASHBOARD_HTML = """<!doctype html>
       document.getElementById('prompt_scout').value = p.scout || '';
       document.getElementById('prompt_analyst').value = p.analyst || '';
       document.getElementById('prompt_critic').value = p.critic || '';
-      const max = s.max_points || {};
-      for (const key of ['priority_match','major_player','corroboration','repeat_penalty','low_value_penalty']) {
-        document.getElementById('score_' + key).value = max[key] || 0;
+      const valueWeights = s.value_weights || {};
+      for (const key of ['relevance_to_richard','strategic_importance','actionability','credibility','novelty','time_sensitivity']) {
+        document.getElementById('score_weight_' + key).value = valueWeights[key] != null ? valueWeights[key] : 0;
       }
-      document.getElementById('low_value_phrases').value = (s.low_value_phrases || []).join('\\n');
+      const trustWeights = s.trust_weights || {};
+      for (const key of ['claim_support_deficit','hype_or_manipulation_deficit','source_credibility_deficit']) {
+        document.getElementById('score_trust_' + key).value = trustWeights[key] != null ? trustWeights[key] : 0;
+      }
+      const trustPenalty = s.trust_penalty || {};
+      document.getElementById('score_trust_penalty_scale').value = trustPenalty.scale != null ? trustPenalty.scale : 0.25;
       document.getElementById('raw_brain').value = brain.raw || '';
     }
     function collectSettings() {
@@ -738,14 +747,22 @@ LEGACY_DASHBOARD_HTML = """<!doctype html>
           critic: document.getElementById('prompt_critic').value
         },
         scoring: {
-          max_points: {
-            priority_match: Number(document.getElementById('score_priority_match').value || 0),
-            major_player: Number(document.getElementById('score_major_player').value || 0),
-            corroboration: Number(document.getElementById('score_corroboration').value || 0),
-            repeat_penalty: Number(document.getElementById('score_repeat_penalty').value || 0),
-            low_value_penalty: Number(document.getElementById('score_low_value_penalty').value || 0)
+          value_weights: {
+            relevance_to_richard: Number(document.getElementById('score_weight_relevance_to_richard').value || 0),
+            strategic_importance: Number(document.getElementById('score_weight_strategic_importance').value || 0),
+            actionability: Number(document.getElementById('score_weight_actionability').value || 0),
+            credibility: Number(document.getElementById('score_weight_credibility').value || 0),
+            novelty: Number(document.getElementById('score_weight_novelty').value || 0),
+            time_sensitivity: Number(document.getElementById('score_weight_time_sensitivity').value || 0)
           },
-          low_value_phrases: document.getElementById('low_value_phrases').value.split(/\\n|,/).map(s => s.trim()).filter(Boolean)
+          trust_weights: {
+            claim_support_deficit: Number(document.getElementById('score_trust_claim_support_deficit').value || 0),
+            hype_or_manipulation_deficit: Number(document.getElementById('score_trust_hype_or_manipulation_deficit').value || 0),
+            source_credibility_deficit: Number(document.getElementById('score_trust_source_credibility_deficit').value || 0)
+          },
+          trust_penalty: {
+            scale: Number(document.getElementById('score_trust_penalty_scale').value || 0)
+          }
         }
       };
     }

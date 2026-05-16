@@ -19,14 +19,38 @@ DEFAULT_PROMPTS = {
 }
 
 DEFAULT_SCORING_RUBRIC: dict[str, Any] = {
-    # 5 components. Values are max points; they must sum to 100.
-    "components": {
-        "priority_match": 25,
-        "company_match": 25,
-        "recency": 15,
-        "event_strength": 25,
-        "corroboration": 10,
+    # Richard Signal Score V2. These are multipliers for 1-5 dimensions.
+    # Sum must be 20 so a perfect 5/5 across six dimensions produces 100.
+    "value_weights": {
+        "relevance_to_richard": 5.0,
+        "strategic_importance": 5.0,
+        "actionability": 3.0,
+        "credibility": 3.0,
+        "novelty": 2.0,
+        "time_sensitivity": 2.0,
     },
+    # Weighted trust deficit, on a 0-100 scale before the penalty scale is applied.
+    "trust_weights": {
+        "claim_support_deficit": 0.50,
+        "hype_or_manipulation_deficit": 0.30,
+        "source_credibility_deficit": 0.20,
+    },
+    "trust_penalty": {
+        "scale": 0.25,
+    },
+    "hard_caps": {
+        "promo_deal_event_registration": 25,
+        "random_gadget_consumer_deal": 30,
+        "generic_tutorial": 45,
+        "direct_builder_tutorial": 60,
+        "generic_funding_announcement": 55,
+        "single_source_sensational_claim": 60,
+        "unsupported_opinion_prediction": 50,
+        "minor_product_launch": 55,
+        "duplicate_or_stale_repeat": 40,
+    },
+    # Internal helper bands. These are still loaded for backwards compatibility,
+    # but the visible score now comes from the V2 value/trust rubric above.
     "recency_bands": {
         "within_1_day": 15,
         "within_3_days": 12,
@@ -128,8 +152,9 @@ def load_scoring_rubric(path: str | Path | None) -> dict[str, Any]:
         return rubric
 
     scoring = raw.get("scoring", {})
-    # 5-component rubric sections — each is a flat int dict
-    for section in ("components", "recency_bands", "event_strength_bands",
+    for section in ("value_weights", "trust_weights", "trust_penalty"):
+        _merge_number_section(rubric[section], scoring.get(section, {}))
+    for section in ("hard_caps", "recency_bands", "event_strength_bands",
                     "priority_match_bands", "company_match_bands", "corroboration_bands"):
         _merge_int_section(rubric[section], scoring.get(section, {}))
     return rubric
@@ -263,19 +288,34 @@ def save_brain_file(path: str | Path, brain: dict[str, Any]) -> None:
 
     scoring = deepcopy(existing.get("scoring") or DEFAULT_SCORING_RUBRIC)
     incoming_scoring = dict(brain.get("scoring") or {})
-    for section in ("components", "recency_bands", "event_strength_bands",
+    for section in ("value_weights", "trust_weights", "trust_penalty"):
+        _merge_number_section(scoring[section], incoming_scoring.get(section, {}))
+    for section in ("hard_caps", "recency_bands", "event_strength_bands",
                     "priority_match_bands", "company_match_bands", "corroboration_bands"):
         _merge_int_section(scoring[section], incoming_scoring.get(section, {}))
 
-    # Validate that the 5 component weights still sum to 100 after merging.
-    # Raise immediately so the dashboard surfaces a clear error rather than
-    # silently writing a broken TOML that produces nonsense scores.
-    component_sum = sum(int(v) for v in scoring["components"].values())
-    if component_sum != 100:
+    # Validate that V2 value weights still produce a 0-100 value score after
+    # merging. Raise immediately so the dashboard surfaces a clear error.
+    value_weight_sum = sum(float(v) for v in scoring["value_weights"].values())
+    if abs(value_weight_sum - 20.0) > 0.001:
         raise ValueError(
-            f"Component weights must sum to 100 (got {component_sum}). "
-            f"Adjust priority_match, company_match, recency, event_strength, or corroboration."
+            f"Value weights must sum to 20 (got {value_weight_sum:g}). "
+            "Adjust relevance_to_richard, strategic_importance, actionability, "
+            "credibility, novelty, or time_sensitivity."
         )
+    trust_weight_sum = sum(float(v) for v in scoring["trust_weights"].values())
+    if abs(trust_weight_sum - 1.0) > 0.001:
+        raise ValueError(
+            f"Trust weights must sum to 1.0 (got {trust_weight_sum:g}). "
+            "Adjust claim_support_deficit, hype_or_manipulation_deficit, or source_credibility_deficit."
+        )
+    scale = float(scoring["trust_penalty"].get("scale", 0.25))
+    if scale < 0 or scale > 1:
+        raise ValueError("Trust penalty scale must be between 0 and 1.")
+    for cap_name, cap_value in scoring["hard_caps"].items():
+        cap_int = int(cap_value)
+        if cap_int < 0 or cap_int > 100:
+            raise ValueError(f"Hard cap {cap_name} must be between 0 and 100.")
 
     behavior = dict(existing.get("behavior") or DEFAULT_BEHAVIOR_SETTINGS)
     behavior.update(dict(brain.get("behavior") or {}))
@@ -328,6 +368,18 @@ def _merge_int_section(target: dict[str, Any], overrides: Any) -> None:
             continue
 
 
+def _merge_number_section(target: dict[str, Any], overrides: Any) -> None:
+    if not isinstance(overrides, dict):
+        return
+    for key, value in overrides.items():
+        if key not in target:
+            continue
+        try:
+            target[str(key)] = float(value)
+        except (TypeError, ValueError):
+            continue
+
+
 def _render_brain_toml(
     prompts: dict[str, str],
     scoring: dict[str, Any],
@@ -372,26 +424,24 @@ def _render_brain_toml(
         ]
     )
 
-    # 5-component scoring rubric sections
+    # Richard Signal Score V2 sections. The older helper bands remain in
+    # DEFAULT_SCORING_RUBRIC for compatibility, but the editable brain file only
+    # exposes the V2 value/trust weights and Python-owned hard caps.
     _scoring_sections = [
-        ("scoring.components", "components",
-         "# 5 components. Values are max points; they must sum to 100."),
-        ("scoring.recency_bands", "recency_bands",
-         "# How many points a story gets based on publication age."),
-        ("scoring.event_strength_bands", "event_strength_bands",
-         "# Strength bands for event type classification."),
-        ("scoring.priority_match_bands", "priority_match_bands",
-         "# Bands for weighted keyword intensity in priority groups."),
-        ("scoring.company_match_bands", "company_match_bands",
-         "# Bands for watchlist company prominence in the story."),
-        ("scoring.corroboration_bands", "corroboration_bands",
-         "# Bands for independent source coverage."),
+        ("scoring.value_weights", "value_weights",
+         "# V2 value multipliers. Six 1-5 dimensions; weights must sum to 20."),
+        ("scoring.trust_weights", "trust_weights",
+         "# V2 trust deficit weights. Weighted deficits are 0-100; weights must sum to 1.0."),
+        ("scoring.trust_penalty", "trust_penalty",
+         "# Penalty scale applied to the weighted trust deficit. 0.25 means max penalty is 25 points."),
+        ("scoring.hard_caps", "hard_caps",
+         "# Python-owned hard caps for low-value patterns."),
     ]
     for toml_section, rubric_key, comment in _scoring_sections:
         lines.extend(["", f"[{toml_section}]", comment])
         current = dict(scoring.get(rubric_key, {}))
         for key, default_val in DEFAULT_SCORING_RUBRIC[rubric_key].items():
-            lines.append(f"{key} = {int(current.get(key, default_val))}")
+            lines.append(f"{key} = {_toml_number(current.get(key, default_val))}")
 
     # Display preferences for the dashboard digest. Editable via Settings page.
     display_safe = dict(DEFAULT_DISPLAY_SETTINGS)
@@ -413,6 +463,16 @@ def _render_brain_toml(
 
 def _toml_text(value: object) -> str:
     return str(value).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _toml_number(value: object) -> str:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        numeric = 0.0
+    if numeric.is_integer():
+        return str(int(numeric))
+    return f"{numeric:.4f}".rstrip("0").rstrip(".")
 
 
 def _toml_bool(value: object) -> str:

@@ -52,10 +52,11 @@ You are the Signal Stream Analyst Agent.
 Your job is to deduplicate, check memory, score signal value, identify themes, and produce digest-ready findings.
 Be harsh. Cut weak articles. Explain why each included item matters.
 
-You will receive a code-generated score breakdown. Treat it as the baseline rubric, not as gospel.
+The score answers one question: should Richard rely on this item for a product, strategy, leadership, or AI-market decision?
+You will receive a code-generated Richard Signal Score V2 breakdown. Treat it as the baseline rubric, not as gospel.
 Use the breakdown to understand why the base score exists, then adjust only when the article meaning clearly deserves it.
 Score adjustment is allowed up to ±20 from the Python base score.
-Prefer strategic substance over hype, promotional fluff, or generic tutorials.
+Prefer strategic substance over hype, promotional fluff, generic tutorials, thin predictions, and weakly supported claims.
 
 Add newly discovered entities when the code missed important companies, people, tools, or products.
 
@@ -110,6 +111,8 @@ confidence_reason (one short sentence):
 Scoring guidance:
 - prefer current, meaningful AI/tech developments over generic tutorials or event promotions
 - prefer strategic impact over hype
+- protect trust: reward concrete claims, named actors, numbers, primary sources, and corroboration
+- discount sensational framing, anonymous/speculative claims, listicle fluff, promotional copy, and unsupported causality
 - downgrade repeated or stale coverage
 - reward concrete implications for builders, operators, product teams, or investors
 
@@ -192,51 +195,36 @@ critic_score_threshold = 70
 # Eligible signals are ranked by trigger severity (missing > truncated > critic-flagged > low-confidence > vague).
 editor_fulltext_fallback_cap = 3
 
-[scoring.components]
-# 5 components. Sum must equal 100.
-priority_match = 25
-company_match = 25
-recency = 15
-event_strength = 25
-corroboration = 10
+[scoring.value_weights]
+# V2 value multipliers. Six 1-5 dimensions; weights must sum to 20.
+relevance_to_richard = 5
+strategic_importance = 5
+actionability = 3
+credibility = 3
+novelty = 2
+time_sensitivity = 2
 
-[scoring.recency_bands]
-within_1_day = 15
-within_3_days = 12
-within_7_days = 9
-older = 6
-unknown = 7
+[scoring.trust_weights]
+# V2 trust deficit weights. Weighted deficits are 0-100; weights must sum to 1.0.
+claim_support_deficit = 0.5
+hype_or_manipulation_deficit = 0.3
+source_credibility_deficit = 0.2
 
-[scoring.event_strength_bands]
-none = 0
-opinion_or_listicle = 5
-useful_analysis = 10
-product_update_or_signal = 15
-launch_funding_regulation = 20
-major_platform_shift = 25
+[scoring.trust_penalty]
+# Penalty scale applied to the weighted trust deficit. 0.25 means max penalty is 25 points.
+scale = 0.25
 
-[scoring.priority_match_bands]
-no_match = 0
-weak_incidental = 5
-one_relevant_not_central = 10
-one_central_or_two_weak = 15
-one_central_with_support = 20
-direct_high_impact = 25
-
-[scoring.company_match_bands]
-no_match = 0
-one_passing = 5
-relevant_not_central = 10
-watchlist_central = 15
-watchlist_in_title_or_lede = 20
-watchlist_strategic_action = 25
-
-[scoring.corroboration_bands]
-single = 0
-same_source_repeated = 3
-two_independent = 5
-three_or_more_independent = 8
-broad_cross_type = 10
+[scoring.hard_caps]
+# Python-owned hard caps for low-value patterns.
+promo_deal_event_registration = 25
+random_gadget_consumer_deal = 30
+generic_tutorial = 45
+direct_builder_tutorial = 60
+generic_funding_announcement = 55
+single_source_sensational_claim = 60
+unsupported_opinion_prediction = 50
+minor_product_launch = 55
+duplicate_or_stale_repeat = 40
 
 # Dashboard display preferences. Edit here, save, and the digest reflects the new settings.
 # page_size = number of signal cards shown per page in the dashboard (1-100).

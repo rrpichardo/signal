@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import json
+import re
 from typing import Any
+from urllib.parse import urlparse
 
 import sys
 
@@ -27,7 +29,7 @@ EVENT_KEYWORDS: dict[str, list[str]] = {
     "platform_shift": ["model", "platform", "API", "agent", "agents", "developer", "enterprise", "pricing", "release", "launch"],
     "startup_signal": ["funding", "seed", "Series A", "Series B", "startup", "valuation", "venture", "YC", "acquisition", "acquires"],
     "infrastructure_signal": ["NVIDIA", "GPU", "chip", "compute", "cloud", "inference", "training", "data center", "latency"],
-    "regulatory_risk": ["regulation", "regulatory", "policy", "copyright", "privacy", "security", "safety", "EU AI Act", "compliance", "lawsuit"],
+    "regulatory_risk": ["regulation", "regulatory", "policy", "copyright", "privacy", "security", "safety", "EU AI Act", "compliance", "lawsuit", "SEC", "inquiry", "investigation", "disclosure", "disclosures"],
     "builder_tactic": ["architecture", "engineering", "RAG", "fine-tuning", "eval", "evaluation", "prompt", "workflow", "case study"],
 }
 
@@ -45,6 +47,63 @@ _LOW_VALUE_PHRASES: frozenset[str] = frozenset([
     "top 10", "best of", "roundup", "listicle", "webinar",
     "register now", "sponsored", "job opening", "we are hiring",
     "newsletter", "conference",
+])
+
+_STRATEGIC_DECISION_TERMS: frozenset[str] = frozenset([
+    "frontier model", "model release", "reasoning model", "agent", "agents",
+    "inference cost", "pricing", "rate limit", "latency", "throughput",
+    "platform", "api", "sdk", "enterprise", "procurement", "go-to-market",
+    "revenue", "arr", "margin", "capex", "regulation", "compliance",
+    "copyright", "lawsuit", "security", "privacy", "governance",
+    "leadership", "strategy", "acquisition", "partnership", "benchmark",
+])
+
+_ACTIONABILITY_TERMS: frozenset[str] = frozenset([
+    "pricing", "cost", "rate limit", "api", "sdk", "migration", "workflow",
+    "procurement", "compliance", "security review", "benchmark", "eval",
+    "evaluation", "latency", "throughput", "deployment", "integration",
+    "roi", "customers", "enterprise", "revenue", "market share", "risk",
+])
+
+_EVIDENCE_SUPPORT_TERMS: frozenset[str] = frozenset([
+    "according to", "announced", "reported", "filing", "data", "survey",
+    "benchmark", "study", "research", "paper", "earnings", "revenue",
+    "customer", "customers", "signed", "launched", "released", "published",
+])
+
+_HYPE_OR_MANIPULATION_PHRASES: frozenset[str] = frozenset([
+    "shocking", "shocking truth", "what they don't want you to know",
+    "they don't want you", "wake up", "exposed", "secret", "insane",
+    "game changer", "changes everything", "ai is changing everything",
+    "you won't believe", "must see", "mind-blowing", "doom", "collapse",
+])
+
+_PROMO_PHRASES: frozenset[str] = frozenset([
+    "register now", "sign up", "webinar", "conference", "event registration",
+    "sponsored", "sponsor", "promo code", "discount", "deals", "on sale",
+    "limited time", "tickets", "join us", "save ",
+])
+
+_CONSUMER_GADGET_TERMS: frozenset[str] = frozenset([
+    "iphone", "android phone", "laptop", "earbuds", "headphones", "tv",
+    "camera", "charger", "smartwatch", "tablet", "gadget", "device deal",
+])
+
+_GENERIC_TUTORIAL_TERMS: frozenset[str] = frozenset([
+    "how to", "tutorial", "beginner", "step by step", "guide", "tips",
+    "top 10", "best ai tools", "tools you need", "ultimate guide",
+])
+
+_PREDICTION_OPINION_TERMS: frozenset[str] = frozenset([
+    "opinion", "prediction", "will change", "future of", "could reshape",
+    "might change", "i think", "why ai will", "what if",
+])
+
+_MATERIAL_DEVELOPMENT_TERMS: frozenset[str] = frozenset([
+    "launch", "launched", "release", "released", "announced", "pricing",
+    "lawsuit", "regulation", "regulatory", "acquisition", "acquires",
+    "funding", "series a", "series b", "series c", "security", "benchmark",
+    "rate limit", "inference cost",
 ])
 
 
@@ -1045,49 +1104,450 @@ def _base_score_card(
     draft: Any,
     scoring_rubric: dict[str, Any],
 ) -> tuple[int, list[dict[str, Any]]]:
-    """5-component explicit scoring rubric. Max 100 points.
+    """Richard Signal Score V2: value dimensions, trust penalty, hard caps.
 
-    Components and caps: priority match (25), company match (25),
-    recency (15), event strength (25), corroboration (10).
-
-    Plain English: this is the single source of truth for Signal.score.
-    No memory penalty, no repeat penalty, no double-counting with a
-    separate RelevanceAgent. The model Analyst can still adjust the score
-    up or down inside the limit set in the brain file.
+    Plain English: this answers "should Richard rely on this item for a
+    product, strategy, leadership, or AI-market decision?" Python owns the
+    structure and caps; the model Analyst can still adjust inside its bounded
+    limit when article meaning clearly deserves it.
     """
-    pm_band, pm_pts = _score_priority_match(
+
+    weights = _value_weights(scoring_rubric)
+    trust_weights = _trust_weights(scoring_rubric)
+    trust_profile = _trust_profile(article, draft)
+
+    dimensions = [
+        ("relevance_to_richard", "Relevance to Richard", *_score_relevance_to_richard(article, draft, scoring_rubric)),
+        ("strategic_importance", "Strategic importance", *_score_strategic_importance(article, draft, scoring_rubric)),
+        ("actionability", "Actionability", *_score_actionability(article, draft)),
+        ("credibility", "Credibility", *_score_credibility(trust_profile)),
+        ("novelty", "Novelty", *_score_novelty(article)),
+        ("time_sensitivity", "Time sensitivity", *_score_time_sensitivity(article, draft)),
+    ]
+
+    breakdown: list[dict[str, Any]] = []
+    value_score = 0.0
+    for key, label, dimension, reason in dimensions:
+        weighted_points = float(dimension) * float(weights.get(key, 0))
+        value_score += weighted_points
+        breakdown.append(_score_line(label, round(weighted_points), f"{dimension}/5. {reason}"))
+
+    trust_deficit = sum(
+        float(trust_profile["deficits"].get(key, 0)) * float(trust_weights.get(key, 0))
+        for key in ("claim_support_deficit", "hype_or_manipulation_deficit", "source_credibility_deficit")
+    )
+    penalty_scale = _trust_penalty_scale(scoring_rubric)
+    trust_penalty = round(trust_deficit * penalty_scale)
+    score_before_caps = max(0, min(100, round(value_score) - trust_penalty))
+    breakdown.append(_score_line(
+        "Trust penalty",
+        -trust_penalty,
+        (
+            f"Weighted trust deficit {trust_deficit:.0f}/100. "
+            f"Claim support {trust_profile['deficits']['claim_support_deficit']}/100; "
+            f"hype/manipulation {trust_profile['deficits']['hype_or_manipulation_deficit']}/100; "
+            f"source credibility {trust_profile['deficits']['source_credibility_deficit']}/100."
+        ),
+    ))
+
+    final_score = score_before_caps
+    cap = _hard_cap(article, draft, trust_profile, scoring_rubric)
+    if cap:
+        cap_value, cap_reason = cap
+        if final_score > cap_value:
+            final_score = cap_value
+        breakdown.append(_score_line("Hard cap", cap_value, cap_reason))
+
+    breakdown.append(_score_line("Score band", final_score, _score_band(final_score)))
+    return max(0, min(100, final_score)), breakdown
+
+
+def _value_weights(scoring_rubric: dict[str, Any]) -> dict[str, float]:
+    defaults = DEFAULT_SCORING_RUBRIC["value_weights"]
+    weights = dict(defaults)
+    weights.update(dict(scoring_rubric.get("value_weights", {})))
+    return {key: float(weights.get(key, defaults[key])) for key in defaults}
+
+
+def _trust_weights(scoring_rubric: dict[str, Any]) -> dict[str, float]:
+    defaults = DEFAULT_SCORING_RUBRIC["trust_weights"]
+    weights = dict(defaults)
+    weights.update(dict(scoring_rubric.get("trust_weights", {})))
+    return {key: float(weights.get(key, defaults[key])) for key in defaults}
+
+
+def _trust_penalty_scale(scoring_rubric: dict[str, Any]) -> float:
+    raw = dict(scoring_rubric.get("trust_penalty", {})).get("scale", DEFAULT_SCORING_RUBRIC["trust_penalty"]["scale"])
+    try:
+        return max(0.0, min(1.0, float(raw)))
+    except (TypeError, ValueError):
+        return 0.25
+
+
+def _score_relevance_to_richard(article: Article, draft: Any, scoring_rubric: dict[str, Any]) -> tuple[int, str]:
+    band, points = _score_priority_match(
         draft.matched_priorities,
-        dict(scoring_rubric.get("priority_match_bands", {})),
+        dict(scoring_rubric.get("priority_match_bands", DEFAULT_SCORING_RUBRIC["priority_match_bands"])),
     )
-    cm_band, cm_pts = _score_company_match(
+    dimension = _dimension_from_points(points, 25)
+    scout_label = str(article.raw.get("scout_relevance_label", "keep")).lower()
+    if scout_label == "drop":
+        dimension = min(dimension, 2)
+    elif scout_label == "borderline":
+        dimension = min(dimension, 3)
+    priority_names = ", ".join(item["name"] for item in draft.matched_priorities[:2]) or "none"
+    return dimension, f"Priority band {band}; matched {priority_names}; Scout label {scout_label or 'keep'}."
+
+
+def _score_strategic_importance(article: Article, draft: Any, scoring_rubric: dict[str, Any]) -> tuple[int, str]:
+    company_band, company_points = _score_company_match(
         article,
         draft,
-        dict(scoring_rubric.get("company_match_bands", {})),
+        dict(scoring_rubric.get("company_match_bands", DEFAULT_SCORING_RUBRIC["company_match_bands"])),
     )
-    rec_band, rec_pts = _score_recency(
-        article,
-        dict(scoring_rubric.get("recency_bands", {})),
-    )
-    es_band, es_pts = _score_event_strength(
+    event_band, event_points = _score_event_strength(
         article,
         draft,
-        dict(scoring_rubric.get("event_strength_bands", {})),
+        dict(scoring_rubric.get("event_strength_bands", DEFAULT_SCORING_RUBRIC["event_strength_bands"])),
     )
-    corr_band, corr_pts = _score_corroboration(
-        draft,
-        dict(scoring_rubric.get("corroboration_bands", {})),
+    priority_band, priority_points = _score_priority_match(
+        draft.matched_priorities,
+        dict(scoring_rubric.get("priority_match_bands", DEFAULT_SCORING_RUBRIC["priority_match_bands"])),
+    )
+    text = _article_text(article)
+    strategic_hits = phrase_hits(text, _STRATEGIC_DECISION_TERMS)
+    dimension = _dimension_from_points(max(company_points, event_points, priority_points), 25)
+    if draft.event_type in {"platform_shift", "infrastructure_signal", "regulatory_risk"} and strategic_hits:
+        dimension = max(dimension, 4)
+    if _has_material_frontier_or_market_shift(text, draft):
+        dimension = 5
+    if any(phrase in text.lower() for phrase in _LOW_VALUE_PHRASES):
+        dimension = min(dimension, 2)
+    return (
+        dimension,
+        (
+            f"Event {draft.event_type.replace('_', ' ')} / {event_band}; "
+            f"company {company_band}; priority {priority_band}; strategic terms {len(strategic_hits)}."
+        ),
     )
 
-    priority_names = ", ".join(item["name"] for item in draft.matched_priorities[:2]) or "none"
-    breakdown = [
-        _score_line("Priority match", pm_pts, f"Band: {pm_band}. Matched: {priority_names}."),
-        _score_line("Company match", cm_pts, f"Band: {cm_band}."),
-        _score_line("Recency", rec_pts, f"Band: {rec_band}."),
-        _score_line("Event strength", es_pts, f"Band: {es_band}. Classified as {draft.event_type.replace('_', ' ')}."),
-        _score_line("Corroboration", corr_pts, f"Band: {corr_band}. {len(draft.cluster.articles)} article(s) in this coverage cluster."),
-    ]
-    total = sum(item["points"] for item in breakdown)
-    return max(0, min(100, total)), breakdown
+
+def _score_actionability(article: Article, draft: Any) -> tuple[int, str]:
+    text = _article_text(article)
+    hits = phrase_hits(text, _ACTIONABILITY_TERMS)
+    has_numbers = bool(re.search(r"\b(?:\$?\d[\d,.]*%?|\d+x)\b", text))
+    actor_count = len(draft.entities.get("competitors", [])) + len(draft.entities.get("organizations", []))
+    if len(hits) >= 4 and (has_numbers or actor_count):
+        dimension = 5
+    elif len(hits) >= 2 and (has_numbers or actor_count or draft.event_type != "general_signal"):
+        dimension = 4
+    elif hits or draft.event_type in {"regulatory_risk", "infrastructure_signal", "platform_shift", "builder_tactic"}:
+        dimension = 3
+    elif _looks_like_generic_tutorial(text):
+        dimension = 2
+    else:
+        dimension = 1
+    return dimension, f"Action terms {', '.join(hits[:4]) or 'none'}; numbers {'yes' if has_numbers else 'no'}; named actors {actor_count}."
+
+
+def _score_credibility(trust_profile: dict[str, Any]) -> tuple[int, str]:
+    support_deficit = int(trust_profile["deficits"]["claim_support_deficit"])
+    source_deficit = int(trust_profile["deficits"]["source_credibility_deficit"])
+    combined = round((support_deficit * 0.55) + (source_deficit * 0.45))
+    if combined <= 15:
+        dimension = 5
+    elif combined <= 30:
+        dimension = 4
+    elif combined <= 50:
+        dimension = 3
+    elif combined <= 70:
+        dimension = 2
+    else:
+        dimension = 1
+    return dimension, f"{trust_profile['source_reason']}; support deficit {support_deficit}/100."
+
+
+def _score_novelty(article: Article) -> tuple[int, str]:
+    age = _article_age_days(article.published_at)
+    text = _article_text(article).lower()
+    stale = _looks_like_stale_repeat(text, age)
+    if stale:
+        return 1, "Looks stale, repeated, or recap-like without a material new development."
+    if age is None:
+        return 3, "Publication date unknown."
+    if age <= 1:
+        return 5, "Published within 1 day."
+    if age <= 3:
+        return 4, "Published within 3 days."
+    if age <= 7:
+        return 3, "Published within 7 days."
+    return 2, f"Published {age} days ago."
+
+
+def _score_time_sensitivity(article: Article, draft: Any) -> tuple[int, str]:
+    age = _article_age_days(article.published_at)
+    text = _article_text(article)
+    material_hits = phrase_hits(text, _MATERIAL_DEVELOPMENT_TERMS)
+    if age is not None and age <= 1 and draft.event_type in {"platform_shift", "regulatory_risk", "infrastructure_signal"}:
+        return 5, f"Fresh {draft.event_type.replace('_', ' ')} with material terms {', '.join(material_hits[:3]) or 'none'}."
+    if age is not None and age <= 3 and material_hits:
+        return 4, f"Recent material development: {', '.join(material_hits[:3])}."
+    if material_hits or draft.event_type in {"startup_signal", "competitor_move", "builder_tactic"}:
+        return 3, f"Useful timing context for {draft.event_type.replace('_', ' ')}."
+    if age is None or age <= 14:
+        return 2, "Current enough to keep as background, but not urgent."
+    return 1, "Older background item."
+
+
+def _trust_profile(article: Article, draft: Any) -> dict[str, Any]:
+    source_tier, source_reason = _source_tier(article)
+    claim_support_deficit, support_reason = _claim_support_deficit(article, draft, source_tier)
+    hype_deficit, hype_reason = _hype_or_manipulation_deficit(article)
+    source_deficit = _source_credibility_deficit(source_tier)
+    return {
+        "source_tier": source_tier,
+        "source_reason": source_reason,
+        "support_reason": support_reason,
+        "hype_reason": hype_reason,
+        "deficits": {
+            "claim_support_deficit": claim_support_deficit,
+            "hype_or_manipulation_deficit": hype_deficit,
+            "source_credibility_deficit": source_deficit,
+        },
+    }
+
+
+def _claim_support_deficit(article: Article, draft: Any, source_tier: int) -> tuple[int, str]:
+    text = _article_text(article)
+    distinct_sources = len({a.source for a in draft.cluster.articles if a.source})
+    has_numbers = bool(re.search(r"\b(?:\$?\d[\d,.]*%?|\d+x)\b", text))
+    actor_count = len(draft.entities.get("competitors", [])) + len(draft.entities.get("organizations", []))
+    evidence_hits = phrase_hits(text, _EVIDENCE_SUPPORT_TERMS)
+
+    support = 0
+    if distinct_sources >= 3:
+        support += 35
+    elif distinct_sources == 2:
+        support += 25
+    elif distinct_sources == 1:
+        support += 8
+    if source_tier <= 2:
+        support += 20
+    elif source_tier <= 4:
+        support += 12
+    if has_numbers:
+        support += 20
+    if actor_count:
+        support += 15
+    if evidence_hits:
+        support += 15
+    if len(text.strip()) < 240:
+        support -= 10
+
+    deficit = max(0, min(100, 100 - support))
+    reason = (
+        f"{distinct_sources} source(s); numbers {'yes' if has_numbers else 'no'}; "
+        f"named actors {actor_count}; evidence terms {len(evidence_hits)}."
+    )
+    return deficit, reason
+
+
+def _hype_or_manipulation_deficit(article: Article) -> tuple[int, str]:
+    text = _article_text(article)
+    title = article.title.strip()
+    text_lower = text.lower()
+    hype_hits = phrase_hits(text, _HYPE_OR_MANIPULATION_PHRASES)
+    promo_hits = phrase_hits(text, _PROMO_PHRASES)
+    deficit = min(60, len(hype_hits) * 20) + min(35, len(promo_hits) * 12)
+    if "!" in title:
+        deficit += 8
+    letters = [c for c in title if c.isalpha()]
+    if letters:
+        uppercase_ratio = sum(1 for c in letters if c.isupper()) / len(letters)
+        if uppercase_ratio > 0.55 and len(letters) >= 12:
+            deficit += 15
+    if "?" in title and any(term in text_lower for term in ("why", "what", "how")) and not _has_material_terms(text):
+        deficit += 8
+    deficit = max(0, min(100, deficit))
+    reason = f"hype terms {len(hype_hits)}; promo terms {len(promo_hits)}."
+    return deficit, reason
+
+
+def _source_tier(article: Article) -> tuple[int, str]:
+    source = article.source.strip().lower()
+    host = urlparse(article.url).netloc.lower().removeprefix("www.")
+    combined = f"{source} {host}"
+    if not source and not host:
+        return 8, "No attributable source"
+    if source in {"openai", "anthropic", "google", "google deepmind", "microsoft", "nvidia", "meta", "aws"}:
+        return 2, f"Tier 1-2 source: {article.source or host}"
+    if any(token in combined for token in (
+        ".gov", "sec.gov", "europa.eu", "who.int", "cdc.gov", "openai.com",
+        "anthropic.com", "googleblog.com", "blog.google", "deepmind.google",
+        "cloud.google.com", "microsoft.com", "nvidia.com", "aws.amazon.com",
+        "azure.microsoft.com", "meta.com",
+    )):
+        return 2, f"Tier 1-2 source: {article.source or host}"
+    if any(token in combined for token in (
+        "reuters", "apnews", "associated press", "bbc", "bloomberg",
+        "financial times", "ft.com", "wall street journal", "wsj",
+        "the information", "techcrunch", "wired", "mit technology review",
+        "technologyreview", "the verge", "cnbc", "nature.com", "science.org",
+        "arxiv", "semianalysis",
+    )):
+        return 3, f"Tier 3-4 source: {article.source or host}"
+    if any(token in combined for token in ("substack", "medium", "beehiiv", "youtube", "newsletter")):
+        return 6, f"Tier 5-6 newsletter/blog source: {article.source or host}"
+    if source in {"unknown", "test", "sample"}:
+        return 7, f"Tier 7 source: {article.source or host}"
+    return 5, f"Tier 5 source: {article.source or host}"
+
+
+def _source_credibility_deficit(source_tier: int) -> int:
+    if source_tier <= 2:
+        return 0
+    if source_tier <= 4:
+        return 15
+    if source_tier <= 6:
+        return 40
+    if source_tier == 7:
+        return 65
+    return 85
+
+
+def _hard_cap(
+    article: Article,
+    draft: Any,
+    trust_profile: dict[str, Any],
+    scoring_rubric: dict[str, Any],
+) -> tuple[int, str] | None:
+    caps = dict(DEFAULT_SCORING_RUBRIC["hard_caps"])
+    caps.update(dict(scoring_rubric.get("hard_caps", {})))
+    text = _article_text(article)
+    text_lower = text.lower()
+    candidates: list[tuple[int, str]] = []
+
+    if phrase_hits(text, _PROMO_PHRASES):
+        candidates.append((_cap(caps, "promo_deal_event_registration"), "Promo, deal, or event-registration pattern."))
+    if phrase_hits(text, _CONSUMER_GADGET_TERMS) and any(term in text_lower for term in ("deal", "discount", "sale", "save ")):
+        candidates.append((_cap(caps, "random_gadget_consumer_deal"), "Random consumer gadget/deal pattern."))
+    if _looks_like_generic_tutorial(text):
+        direct_builder = _is_direct_builder_tutorial(draft, text)
+        key = "direct_builder_tutorial" if direct_builder else "generic_tutorial"
+        candidates.append((_cap(caps, key), "Generic tutorial pattern." if not direct_builder else "Builder tutorial pattern with direct usefulness."))
+    if _looks_like_generic_funding_announcement(text, draft):
+        candidates.append((_cap(caps, "generic_funding_announcement"), "Generic funding announcement without a clear strategic development."))
+    if len({a.source for a in draft.cluster.articles if a.source}) <= 1 and trust_profile["deficits"]["hype_or_manipulation_deficit"] >= 30:
+        candidates.append((_cap(caps, "single_source_sensational_claim"), "Single-source sensational claim."))
+    if _looks_like_unsupported_opinion_prediction(text, draft):
+        candidates.append((_cap(caps, "unsupported_opinion_prediction"), "Opinion or prediction without a concrete event."))
+    if _looks_like_minor_product_launch(text, draft):
+        candidates.append((_cap(caps, "minor_product_launch"), "Minor product launch without a decision-shaping platform move."))
+    if _looks_like_stale_repeat(text_lower, _article_age_days(article.published_at)):
+        candidates.append((_cap(caps, "duplicate_or_stale_repeat"), "Duplicate, stale, or recap-like repeat."))
+
+    if not candidates:
+        return None
+    return min(candidates, key=lambda item: item[0])
+
+
+def _cap(caps: dict[str, Any], key: str) -> int:
+    default = DEFAULT_SCORING_RUBRIC["hard_caps"][key]
+    try:
+        return max(0, min(100, int(caps.get(key, default))))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _dimension_from_points(points: int, max_points: int) -> int:
+    if max_points <= 0:
+        return 1
+    ratio = points / max_points
+    if ratio >= 0.85:
+        return 5
+    if ratio >= 0.65:
+        return 4
+    if ratio >= 0.45:
+        return 3
+    if ratio >= 0.25:
+        return 2
+    return 1
+
+
+def _article_text(article: Article) -> str:
+    return f"{article.title} {article.body}"
+
+
+def _has_material_terms(text: str) -> bool:
+    return bool(phrase_hits(text, _MATERIAL_DEVELOPMENT_TERMS))
+
+
+def _has_material_frontier_or_market_shift(text: str, draft: Any) -> bool:
+    text_lower = text.lower()
+    if "inference cost" in text_lower or "rate limit" in text_lower:
+        return True
+    if draft.event_type in {"platform_shift", "regulatory_risk"} and _has_material_terms(text):
+        return True
+    if draft.event_type == "infrastructure_signal" and any(term in text_lower for term in ("inference", "compute", "gpu", "capacity", "capex")):
+        return True
+    return False
+
+
+def _looks_like_generic_tutorial(text: str) -> bool:
+    return bool(phrase_hits(text, _GENERIC_TUTORIAL_TERMS))
+
+
+def _is_direct_builder_tutorial(draft: Any, text: str) -> bool:
+    priority_names = " ".join(item.get("name", "") for item in draft.matched_priorities).lower()
+    builder_priority = "builder" in priority_names or "developer workflow" in priority_names
+    builder_terms = phrase_hits(text, ["production", "eval", "evaluation", "rag", "latency", "cost optimization", "observability"])
+    return draft.event_type == "builder_tactic" and builder_priority and bool(builder_terms)
+
+
+def _looks_like_generic_funding_announcement(text: str, draft: Any) -> bool:
+    text_lower = text.lower()
+    has_funding_language = any(term in text_lower for term in ("raises", "funding", "funded", "series a", "series b", "series c", "seed round"))
+    if not has_funding_language:
+        return False
+    strategic_terms = phrase_hits(text, ["customer", "revenue", "arr", "launch", "acquisition", "partnership", "enterprise", "platform", "pricing"])
+    return len(strategic_terms) <= 1
+
+
+def _looks_like_unsupported_opinion_prediction(text: str, draft: Any) -> bool:
+    if draft.event_type != "general_signal":
+        return False
+    return bool(phrase_hits(text, _PREDICTION_OPINION_TERMS)) and not _has_material_terms(text)
+
+
+def _looks_like_minor_product_launch(text: str, draft: Any) -> bool:
+    text_lower = text.lower()
+    if not any(term in text_lower for term in ("launch", "launches", "released", "releases", "announces", "announced")):
+        return False
+    if _has_material_frontier_or_market_shift(text, draft):
+        return False
+    if any(term in text_lower for term in ("frontier model", "reasoning model", "enterprise", "platform", "api", "pricing")):
+        return False
+    return any(term in text_lower for term in ("feature", "plugin", "extension", "app", "tool", "minor update"))
+
+
+def _looks_like_stale_repeat(text_lower: str, age: int | None) -> bool:
+    stale_phrase = any(term in text_lower for term in ("weekly roundup", "recap", "icymi", "what happened this week", "newsletter roundup"))
+    material = any(term in text_lower for term in _MATERIAL_DEVELOPMENT_TERMS)
+    if stale_phrase and not material:
+        return True
+    return age is not None and age > 30 and not material
+
+
+def _score_band(score: int) -> str:
+    if score >= 85:
+        return "85-100: Must-read / lead item."
+    if score >= 75:
+        return "75-84: High-priority strategic signal."
+    if score >= 65:
+        return "65-74: Useful decision context."
+    if score >= 50:
+        return "50-64: Background only."
+    return "<50: Skip."
 
 
 def _score_priority_match(
