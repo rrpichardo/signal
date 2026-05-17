@@ -18,10 +18,21 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, column_typ
 
 class SignalStorage:
     def __init__(self, path: str | Path):
-        self.path = Path(path).expanduser().resolve()
+        if str(path) == ":memory:":
+            # Each sqlite3.connect(":memory:") opens a fresh empty database, so
+            # we can't create a new connection per call. Hold one persistent
+            # connection and return it every time connect() is called.
+            self.path: Path | str = ":memory:"
+            self._mem_conn: sqlite3.Connection | None = sqlite3.connect(":memory:")
+            self._mem_conn.row_factory = sqlite3.Row
+        else:
+            self.path = Path(path).expanduser().resolve()
+            self._mem_conn = None
 
     def connect(self) -> sqlite3.Connection:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if self._mem_conn is not None:
+            return self._mem_conn
+        Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.path)
         conn.row_factory = sqlite3.Row
         return conn
