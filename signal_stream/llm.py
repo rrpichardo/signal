@@ -12,6 +12,19 @@ from .models import SignalConfig
 GROQ_USER_AGENT = "SignalStream/1.0"
 
 
+def _format_http_error(exc: error.HTTPError) -> str:
+    # Capture a bounded slice of the response body. Groq's 4xx bodies carry the
+    # real reason (rate-limit text, prompt-guard rejection, billing hold) that
+    # `exc.reason` ("Forbidden") never reveals. Cap at 600 chars so noisy HTML
+    # error pages don't bloat event payloads.
+    try:
+        body = exc.read().decode("utf-8", errors="replace")[:600].strip()
+    except Exception:  # noqa: BLE001 - body read must never mask the original error
+        body = ""
+    base = f"Groq HTTP {exc.code}: {exc.reason}"
+    return f"{base} — body: {body}" if body else base
+
+
 class BrainClient:
     def __init__(self, config: SignalConfig):
         self.config = config.brain
@@ -133,13 +146,13 @@ class BrainClient:
                             self.last_error = f"Hit Groq rate limit three times: {exc3}"
                             return None
                     else:
-                        self.last_error = f"Groq HTTP {exc2.code}: {exc2.reason}"
+                        self.last_error = _format_http_error(exc2)
                         return None
                 except Exception as exc2:  # noqa: BLE001
                     self.last_error = str(exc2)
                     return None
             else:
-                self.last_error = f"Groq HTTP {exc.code}: {exc.reason}"
+                self.last_error = _format_http_error(exc)
                 return None
         except (error.URLError, TimeoutError, json.JSONDecodeError) as exc:
             self.last_error = str(exc)
