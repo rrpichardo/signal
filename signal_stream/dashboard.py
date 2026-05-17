@@ -497,6 +497,7 @@ def _handler(storage: SignalStorage, config: SignalConfig, config_path: str = "c
                     try:
                         res = future.result()
                         storage.save_source_health(res)
+                        # Include confidence in the response alongside other health metrics.
                         results.append({
                             "source_id": res.source_id,
                             "source_name": res.source_name,
@@ -505,6 +506,7 @@ def _handler(storage: SignalStorage, config: SignalConfig, config_path: str = "c
                             "article_count": res.article_count,
                             "paywall_detected": res.paywall_detected,
                             "error_msg": res.error_msg,
+                            "confidence": res.confidence,
                         })
                     except Exception as exc:  # noqa: BLE001 - partial failure; continue other sources.
                         rec = futures[future]
@@ -532,6 +534,17 @@ def _handler(storage: SignalStorage, config: SignalConfig, config_path: str = "c
             if missing:
                 self._send_error(400, f"Missing required fields: {missing}")
                 return
+            # Validate that 'kind' is one of the known source types.
+            VALID_KINDS = {"rss", "atom", "youtube", "html_scrape", "sample", "report"}
+            if body.get("kind") not in VALID_KINDS:
+                self._send_error(400, f"Invalid kind '{body.get('kind')}'. Must be one of: {sorted(VALID_KINDS)}")
+                return
+            # Validate that 'limit' is an integer.
+            try:
+                limit_count = int(body.get("limit", 8))
+            except (TypeError, ValueError):
+                self._send_error(400, "Invalid value for 'limit' — must be an integer")
+                return
             from signal_stream.source_registry import SourceRecord, generate_source_id
             from datetime import datetime, timezone
             now = datetime.now(timezone.utc).isoformat()
@@ -548,7 +561,7 @@ def _handler(storage: SignalStorage, config: SignalConfig, config_path: str = "c
                 path=body.get("path"),
                 channel_id=body.get("channel_id"),
                 article_link_pattern=body.get("article_link_pattern"),
-                limit_count=int(body.get("limit", 8)),
+                limit_count=limit_count,
                 enabled=True,
                 on_demand=bool(body.get("on_demand", False)),
                 origin="manual",
