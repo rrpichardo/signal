@@ -4,6 +4,7 @@ import DigestPage from "@/pages/DigestPage";
 import SignalDetailPage from "@/pages/SignalDetailPage";
 import ActivityPage from "@/pages/ActivityPage";
 import MemoryPage from "@/pages/MemoryPage";
+import SourcesPage from "@/pages/SourcesPage";
 import SettingsPage from "@/pages/SettingsPage";
 import NotFoundPage from "@/pages/NotFoundPage";
 
@@ -18,6 +19,7 @@ export default function App() {
         <Route path="signals/:id" element={<SignalDetailPage />} />
         <Route path="activity" element={<ActivityPage />} />
         <Route path="memory" element={<MemoryPage />} />
+        <Route path="sources" element={<SourcesPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="*" element={<NotFoundPage />} />
       </Route>

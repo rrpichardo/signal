@@ -32,6 +32,7 @@ export function Masthead() {
             { to: "/", label: "Digest", end: true },
             { to: "/activity", label: "Activity" },
             { to: "/memory", label: "Memory" },
+            { to: "/sources", label: "Sources" },
             { to: "/settings", label: "Settings" },
           ].map((link) => (
             <NavLink
