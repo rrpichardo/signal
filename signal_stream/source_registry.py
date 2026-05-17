@@ -28,8 +28,9 @@ def generate_source_id(
     url: str | None, path: str | None, channel_id: str | None,
 ) -> str:
     """
-    Return a stable, content-derived ID that survives restarts and renames.
+    Return a stable, content-derived ID that survives restarts (given the same inputs).
     Hashes origin + name + kind + connection params to produce a deterministic ID.
+    Note: The name field IS included in the hash, so renaming a source produces a new ID.
     """
     # Build identity string from non-null connection params; treat None as empty string.
     identity = f"{origin}:{name}:{kind}:{url or ''}:{path or ''}:{channel_id or ''}"
@@ -64,6 +65,8 @@ def source_config_to_record(source, origin: str = "toml") -> SourceRecord:
         enabled=source.enabled,
         on_demand=on_demand,
         origin=origin,
+        # created_at is set here on initial conversion; the upsert layer must preserve this
+        # timestamp when updating existing records (not regenerate it).
         created_at=now,
         updated_at=now,
     )
@@ -74,6 +77,7 @@ def source_record_to_config(record: SourceRecord):
     Convert a SourceRecord back to a SourceConfig for the existing fetch pipeline.
     This allows registry records to be re-used by the scout/analyst without schema duplication.
     """
+    # Deferred import to avoid circular dependency on signal_stream.models.
     from signal_stream.models import SourceConfig
 
     return SourceConfig(
