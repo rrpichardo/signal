@@ -30,30 +30,180 @@ from .storage import SignalStorage
 
 # ── Phase 3: Executive Briefing ───────────────────────────────────────────────
 
-# JSONSchema the Editor's Groq call must match.
+# Bump when the briefing JSON shape changes incompatibly. Storage normalizes
+# older versions on read so the UI never sees a v1 shape.
+BRIEFING_SCHEMA_VERSION = 2
+
+# JSONSchema the Editor's Groq call must match. Documentation-only: Groq's
+# response_format=json_object enforces valid JSON but not shape. Runtime shape
+# enforcement happens in _validate_editor_briefing() below.
 EDITOR_BRIEFING_SCHEMA = {
     "type": "object",
     "properties": {
         "headline": {"type": "string"},
-        "briefing_paragraphs": {"type": "array", "items": {"type": "string"}},
+        "summary": {"type": "string"},
+        "key_takeaways": {"type": "array", "items": {"type": "string"}},
+        "insights": {"type": "array", "items": {"type": "string"}},
+        "briefing_paragraphs": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "heading": {"type": "string"},
+                    "body": {"type": "string"},
+                    "bullets": {"type": "array", "items": {"type": "string"}},
+                    "signal_ids": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        },
         "key_themes": {
             "type": "array",
             "items": {
                 "type": "object",
                 "properties": {
                     "label": {"type": "string"},
-                    "signal_ids": {"type": "array", "items": {"type": "string"}},
                     "summary": {"type": "string"},
+                    "signal_ids": {"type": "array", "items": {"type": "string"}},
                 },
             },
         },
-        "watch_items": {"type": "array", "items": {"type": "string"}},
         "cross_signal_narrative": {"type": "string"},
+        "watch_items": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["headline", "briefing_paragraphs", "cross_signal_narrative"],
+    "required": ["headline", "summary", "key_takeaways", "briefing_paragraphs"],
 }
 
 _BRIEFING_MECHANISM_MIN = 40  # chars — mirrors Phase 4's _MECHANISM_MIN_CHARS
+
+
+def _coerce_string_list(value: Any) -> list[str]:
+    """Coerce a value into a list of non-empty stripped strings."""
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if isinstance(item, (str, int, float)) and str(item).strip()]
+
+
+def _coerce_briefing_paragraph(item: Any) -> dict[str, Any]:
+    """Coerce one briefing_paragraphs entry into the v2 nested shape.
+
+    Strings (legacy v1 shape) are wrapped as `{heading: "", body: item, bullets: [], signal_ids: []}`.
+    Dicts get missing keys filled with safe defaults.
+    """
+    if isinstance(item, str):
+        return {"heading": "", "body": item.strip(), "bullets": [], "signal_ids": []}
+    if isinstance(item, dict):
+        return {
+            "heading": str(item.get("heading", "")).strip(),
+            "body": str(item.get("body", "")).strip(),
+            "bullets": _coerce_string_list(item.get("bullets")),
+            "signal_ids": _coerce_string_list(item.get("signal_ids")),
+        }
+    return {"heading": "", "body": "", "bullets": [], "signal_ids": []}
+
+
+def _coerce_key_theme(item: Any) -> dict[str, Any]:
+    """Coerce one key_themes entry into a stable shape."""
+    if not isinstance(item, dict):
+        return {"label": "", "summary": "", "signal_ids": []}
+    return {
+        "label": str(item.get("label", "")).strip(),
+        "summary": str(item.get("summary", "")).strip(),
+        "signal_ids": _coerce_string_list(item.get("signal_ids")),
+    }
+
+
+def _validate_editor_briefing(raw: Any) -> dict[str, Any] | None:
+    """Coerce a raw Groq briefing response into the v2 schema, or return None if unusable.
+
+    Returns None when the response has neither a headline nor any briefing_paragraphs —
+    the caller treats None as "Editor failed, surface the empty-state". Otherwise
+    every field is coerced into a stable shape so downstream code (storage + UI)
+    never sees missing keys or wrong types.
+
+    Also used by storage.get_latest_briefing() to normalize legacy v1 briefings
+    on read (where briefing_paragraphs were `string[]` instead of objects).
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    headline = str(raw.get("headline", "")).strip()
+    paragraphs_raw = raw.get("briefing_paragraphs")
+    paragraphs = [_coerce_briefing_paragraph(p) for p in paragraphs_raw] if isinstance(paragraphs_raw, list) else []
+    paragraphs = [p for p in paragraphs if p["body"] or p["heading"] or p["bullets"]]
+
+    # Structurally unusable: no headline AND no paragraphs → caller marks failed.
+    if not headline and not paragraphs:
+        return None
+
+    return {
+        "headline": headline,
+        "summary": str(raw.get("summary", "")).strip(),
+        "key_takeaways": _coerce_string_list(raw.get("key_takeaways")),
+        "insights": _coerce_string_list(raw.get("insights")),
+        "briefing_paragraphs": paragraphs,
+        "key_themes": [_coerce_key_theme(t) for t in (raw.get("key_themes") or []) if isinstance(t, dict)],
+        "cross_signal_narrative": str(raw.get("cross_signal_narrative", "")).strip(),
+        "watch_items": _coerce_string_list(raw.get("watch_items")),
+    }
+
+
+def normalize_briefing_for_read(briefing: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Normalize a stored briefing JSON into the v2 schema for UI consumption.
+
+    Handles three legacy shapes:
+      1. Pre-v2 flat shape: `{headline, briefing_paragraphs: string[], ...}` —
+         the string[] paragraphs get wrapped as v2 paragraph objects.
+      2. Nested-wrapper shape: `{briefing: {...Groq response}, ...provenance}`
+         emitted by an older worktree's editor path. We unwrap and re-merge.
+      3. Off-schema Groq response: `{insights, key_takeaways, summary, title,
+         recommendations}` (the bug we just fixed). We rescue the matching keys
+         and synthesize a paragraphs body from the summary so the UI shows
+         something instead of a blank card.
+    """
+    if not isinstance(briefing, dict):
+        return briefing
+    if briefing.get("schema_version") == BRIEFING_SCHEMA_VERSION:
+        return briefing
+
+    # Provenance fields the validator does not own — preserve as-is.
+    provenance_keys = (
+        "source_signal_ids", "input_artifact_count", "artifact_coverage",
+        "any_artifact_truncated", "generated_at",
+    )
+    preserved = {k: briefing.get(k) for k in provenance_keys if k in briefing}
+
+    # Unwrap shape 2 (nested-wrapper): merge inner briefing's content fields up.
+    content = dict(briefing)
+    nested = content.get("briefing")
+    if isinstance(nested, dict):
+        for k, v in nested.items():
+            content.setdefault(k, v)
+
+    # Shape 3 rescue: if no headline/briefing_paragraphs but there's a `title`
+    # or `summary`, synthesize a minimal v2 body so the card isn't blank.
+    if not content.get("headline") and content.get("title"):
+        content["headline"] = str(content["title"]).strip()
+    if not content.get("briefing_paragraphs") and content.get("summary"):
+        # Wrap the off-schema summary as a single legacy-paragraph string so
+        # _coerce_briefing_paragraph turns it into a usable v2 object.
+        content["briefing_paragraphs"] = [str(content["summary"]).strip()]
+    # Rescue insights/key_takeaways/recommendations if present at the right spot.
+    if "key_takeaways" not in content and isinstance(content.get("recommendations"), list):
+        content["key_takeaways"] = content["recommendations"]
+
+    normalized = _validate_editor_briefing(content) or {
+        "headline": str(content.get("headline", "")).strip(),
+        "summary": str(content.get("summary", "")).strip(),
+        "key_takeaways": [],
+        "insights": [],
+        "briefing_paragraphs": [],
+        "key_themes": [],
+        "cross_signal_narrative": "",
+        "watch_items": [],
+    }
+    normalized.update(preserved)
+    normalized["schema_version"] = BRIEFING_SCHEMA_VERSION
+    return normalized
 
 
 def _parse_artifact(sig: Signal) -> dict[str, Any] | None:
@@ -104,19 +254,40 @@ def _coverage(top_signals: list[Signal]) -> dict[str, Any]:
 
 
 def _build_signal_block(sig: Signal) -> dict[str, Any]:
-    """Flatten one signal + its artifact into the JSON block sent to the Editor."""
+    """Flatten one signal into the JSON block sent to the Editor.
+
+    Always produces a usable evidence block, tagged with its provenance so the
+    Editor prompt can hedge bullets drawn from summary fallbacks. Order of
+    preference: artifact mechanism (best) → expanded_summary → short_summary.
+    """
     artifact = _parse_artifact(sig) or {}
+    mechanism = str(artifact.get("mechanism") or "").strip()
+    expanded = str(getattr(sig, "expanded_summary", "") or "").strip()
+    short = str(getattr(sig, "short_summary", "") or "").strip()
+
+    if mechanism and not _is_thin(artifact):
+        evidence_text = mechanism
+        evidence_source = "artifact_mechanism"
+        confidence = artifact.get("confidence") or "medium"
+    elif expanded:
+        evidence_text = expanded
+        evidence_source = "expanded_summary"
+        confidence = "low"
+    else:
+        evidence_text = short
+        evidence_source = "short_summary"
+        confidence = "low"
+
     return {
-        "id": sig.id,
+        "signal_id": sig.id,
         "title": sig.title,
         "score": sig.score,
         "source": sig.source,
-        "short_summary": sig.short_summary,
-        "expanded_summary": sig.expanded_summary,
-        "mechanism": artifact.get("mechanism") or "",
+        "evidence_text": evidence_text,
+        "evidence_source": evidence_source,
         "key_actors": artifact.get("key_actors") or [],
         "affected_parties": artifact.get("affected_parties") or [],
-        "confidence": artifact.get("confidence") or "medium",
+        "confidence": confidence,
     }
 
 
@@ -128,16 +299,18 @@ def generate_briefing_from_artifacts(
 ) -> dict[str, Any]:
     """Reduce top signals into one executive briefing via a single Groq call.
 
-    Pure reducer — reads artifacts only, never re-fetches articles.
-    Raises RuntimeError on LLM failure so _call_editor() can handle it cleanly.
+    Pure reducer — reads artifacts and short summaries only, never re-fetches.
+    Raises RuntimeError on LLM failure or unrecoverable shape mismatch so
+    _call_editor() handles it cleanly.
     """
     if not top_signals:
         raise RuntimeError("No signals provided to generate briefing from.")
 
-    # Only analyst-confirmed signals contribute evidence to briefing prose.
-    # Signals with failed/pending/skipped status are excluded so raw RSS text
-    # or cookie banners never flow into the executive briefing.
-    evidence_signals = [s for s in top_signals if _is_analyst_evidence(s)]
+    # Evidence preference: prefer signals with a confirmed analyst artifact, but
+    # fall back to all top signals when artifacts are missing across the board.
+    # Per-block `evidence_source` and `confidence` tags tell the Editor how much
+    # to lean on each bullet.
+    evidence_signals = [s for s in top_signals if _is_analyst_evidence(s)] or list(top_signals)
 
     cov = _coverage(top_signals)
     payload = {
@@ -147,14 +320,30 @@ def generate_briefing_from_artifacts(
         "signals": [_build_signal_block(sig) for sig in evidence_signals],
     }
 
-    raw = brain.chat_json(editor_prompt, json.dumps(payload, sort_keys=True), EDITOR_BRIEFING_SCHEMA)
+    # `required_fields` works on top-level keys only — that's exactly the editor
+    # response shape, so the retry loop in chat_json catches missing headline /
+    # briefing_paragraphs and asks Groq to redo the response.
+    raw = brain.chat_json(
+        editor_prompt,
+        json.dumps(payload, sort_keys=True),
+        EDITOR_BRIEFING_SCHEMA,
+        required_fields=["headline", "briefing_paragraphs"],
+    )
     if not raw:
         raise RuntimeError(f"Editor Groq call returned nothing: {brain.last_error or 'unknown error'}")
 
-    briefing = dict(raw)
+    validated = _validate_editor_briefing(raw)
+    if validated is None:
+        raise RuntimeError(
+            "Editor response could not be coerced into v2 briefing schema "
+            f"(keys: {sorted(raw.keys()) if isinstance(raw, dict) else type(raw).__name__})"
+        )
+
+    briefing = dict(validated)
+    briefing["schema_version"] = BRIEFING_SCHEMA_VERSION
     # Attach provenance fields so the dashboard and storage can trace the output.
     briefing["source_signal_ids"] = [sig.id for sig in top_signals]
-    briefing["input_artifact_count"] = len(evidence_signals)
+    briefing["input_artifact_count"] = sum(1 for s in top_signals if _is_analyst_evidence(s))
     briefing["artifact_coverage"] = cov["artifact_coverage"]
     briefing["any_artifact_truncated"] = cov["any_artifact_truncated"]
     briefing["generated_at"] = datetime.now(timezone.utc).isoformat()

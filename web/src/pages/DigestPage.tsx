@@ -152,7 +152,7 @@ export default function DigestPage() {
           may serve a *prior* run's briefing tagged stale=true when the latest
           run was too weak; we render a "showing previous briefing" note in
           that case instead of pretending the briefing is fresh. */}
-      {scope === "latest" && page === 1 && (briefingData?.briefing_status === "generated" || briefingData?.briefing_status === "partial") && briefingData.briefing && (
+      {scope === "latest" && page === 1 && (briefingData?.briefing_status === "generated" || briefingData?.briefing_status === "partial") && briefingData.briefing && hasRenderableBriefingContent(briefingData.briefing) && (
         <BriefingBlock
           briefing={briefingData.briefing}
           status={briefingData.briefing_status}
@@ -161,13 +161,17 @@ export default function DigestPage() {
         />
       )}
 
-      {/* Missing-briefing hint — shown when the latest run has no briefing
-          (status is pending / failed / skipped, or the column is NULL for
-          pre-Phase-3 runs). Tells the reader the feature exists but didn't
-          produce output this run, instead of silently hiding. */}
+      {/* Missing-briefing hint — fires when the latest run has no usable
+          briefing. Covers three cases: status is pending/failed/skipped, the
+          DB column is NULL for pre-Phase-3 runs, OR the briefing exists but
+          has no renderable content (off-schema or empty after normalization).
+          The renderable guard prevents a silent blank card. */}
       {scope === "latest" && page === 1 && briefingData &&
-       briefingData.briefing_status !== "generated" &&
-       briefingData.briefing_status !== "partial" && (
+       (
+         (briefingData.briefing_status !== "generated" && briefingData.briefing_status !== "partial") ||
+         !briefingData.briefing ||
+         !hasRenderableBriefingContent(briefingData.briefing)
+       ) && (
         <div className="mb-8 rounded-md border border-dashed border-border bg-muted/10 px-4 py-3 text-meta text-muted-foreground">
           Intelligence briefing not generated for this run — re-run the agent to produce one.
         </div>
@@ -238,6 +242,19 @@ function ScopeToggle({ scope, onChange }: { scope: Scope; onChange: (s: Scope) =
 // stale=true, when the backend served a *prior* run's briefing because the
 // latest run was too weak. The stale note tells the reader the briefing is
 // not fresh, so they don't think the dashboard is broken.
+// True only when the briefing has enough content to render meaningfully.
+// Without this guard, an off-schema or fully-coerced-empty briefing renders as
+// a bare "Intelligence briefing" card header with nothing underneath.
+function hasRenderableBriefingContent(b: ExecutiveBriefing): boolean {
+  const headline = (b.headline || "").trim();
+  if (!headline) return false;
+  return Boolean(
+    (b.summary || "").trim() ||
+    (b.key_takeaways && b.key_takeaways.length > 0) ||
+    (b.briefing_paragraphs && b.briefing_paragraphs.length > 0)
+  );
+}
+
 function BriefingBlock({
   briefing,
   status,
@@ -253,33 +270,65 @@ function BriefingBlock({
     <div className="mb-8 rounded-md border border-border bg-muted/20 p-6">
       <div className="kicker mb-3">Intelligence briefing</div>
 
-      {/* Stale-briefing note. Only renders when the briefing came from a
-          prior run. Reads "showing previous briefing from X ago" so the
-          reader can tell at a glance that today's run didn't produce
-          enough new signal to refresh the headline. */}
+      {/* Stale-briefing note — only when this briefing came from a prior run. */}
       {stale && staleRunStartedAt && (
         <p className="mb-4 text-meta text-muted-foreground">
           Not enough new signal to update — showing previous briefing from {relativeTime(staleRunStartedAt)}.
         </p>
       )}
 
-      {/* Headline */}
-      <p className="mb-4 font-serif text-h3 font-semibold leading-snug text-foreground">
+      {/* Headline — the single most consequential development today. */}
+      <p className="mb-3 font-serif text-h3 font-semibold leading-snug text-foreground">
         {briefing.headline}
       </p>
 
-      {/* Narrative paragraphs */}
-      {briefing.briefing_paragraphs?.length > 0 && (
-        <div className="mb-5 space-y-3">
-          {briefing.briefing_paragraphs.map((para, i) => (
-            <p key={i} className="text-body text-foreground/85">{para}</p>
+      {/* Summary — macro story under the headline. */}
+      {briefing.summary && (
+        <p className="mb-5 text-body text-foreground/85">{briefing.summary}</p>
+      )}
+
+      {/* Key takeaways — the punchy "you only read this" bullets. Prominent
+          styling because these are the highest-value content in the briefing. */}
+      {briefing.key_takeaways && briefing.key_takeaways.length > 0 && (
+        <div className="mb-6">
+          <div className="kicker mb-2">Key takeaways</div>
+          <ul className="list-disc space-y-1.5 pl-5">
+            {briefing.key_takeaways.map((item, i) => (
+              <li key={i} className="text-ui font-medium text-foreground">{item}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Themed sections — each has a subhead, framing body, and nested bullets.
+          This is where the bulk of the synthesis lives. */}
+      {briefing.briefing_paragraphs && briefing.briefing_paragraphs.length > 0 && (
+        <div className="mb-6 space-y-5">
+          {briefing.briefing_paragraphs.map((section, i) => (
+            <div key={i}>
+              {section.heading && (
+                <h3 className="mb-1 font-serif text-dek font-semibold text-foreground">
+                  {section.heading}
+                </h3>
+              )}
+              {section.body && (
+                <p className="mb-2 text-body text-foreground/85">{section.body}</p>
+              )}
+              {section.bullets && section.bullets.length > 0 && (
+                <ul className="list-disc space-y-1 pl-5">
+                  {section.bullets.map((b, j) => (
+                    <li key={j} className="text-ui text-foreground/85">{b}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
           ))}
         </div>
       )}
 
-      {/* Key themes */}
-      {briefing.key_themes?.length > 0 && (
-        <div className="mb-5">
+      {/* Key themes — skim-view chip strip. Tight labels, 1-sentence summaries. */}
+      {briefing.key_themes && briefing.key_themes.length > 0 && (
+        <div className="mb-6">
           <div className="kicker mb-2">Key themes</div>
           <ul className="space-y-2">
             {briefing.key_themes.map((theme, i) => (
@@ -294,8 +343,27 @@ function BriefingBlock({
         </div>
       )}
 
-      {/* Watch items */}
-      {briefing.watch_items?.length > 0 && (
+      {/* Insights — second-order observations and cross-signal patterns. */}
+      {briefing.insights && briefing.insights.length > 0 && (
+        <div className="mb-6">
+          <div className="kicker mb-2">Insights</div>
+          <ul className="list-disc space-y-1 pl-5">
+            {briefing.insights.map((item, i) => (
+              <li key={i} className="text-ui italic text-foreground/80">{item}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Cross-signal narrative — closing synthesis. */}
+      {briefing.cross_signal_narrative && (
+        <p className="mb-5 text-body text-foreground/80">
+          {briefing.cross_signal_narrative}
+        </p>
+      )}
+
+      {/* Watch items — forward-looking alerts. */}
+      {briefing.watch_items && briefing.watch_items.length > 0 && (
         <div className="mb-4">
           <div className="kicker mb-2">Watch</div>
           <ul className="list-disc space-y-1 pl-5">
@@ -306,7 +374,7 @@ function BriefingBlock({
         </div>
       )}
 
-      {/* Footnotes: partial coverage warning, truncation note */}
+      {/* Footnotes: partial coverage and truncation. */}
       <div className="mt-4 space-y-1">
         {status === "partial" && (
           <p className="text-meta text-muted-foreground">

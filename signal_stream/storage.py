@@ -720,6 +720,15 @@ class SignalStorage:
         except json.JSONDecodeError:
             briefing = None
 
+        # Normalize legacy briefings (pre-v2 schema, string[] paragraphs, no
+        # summary/key_takeaways/insights) into the current shape so the UI never
+        # has to handle two formats. Import is local to avoid a circular dep at
+        # module load time (editor_tools imports analysis_tools, which imports
+        # storage indirectly via SignalStorage).
+        if briefing is not None:
+            from .editor_tools import normalize_briefing_for_read
+            briefing = normalize_briefing_for_read(briefing)
+
         return {
             "briefing": briefing,
             "briefing_status": chosen["briefing_status"] or "skipped",

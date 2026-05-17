@@ -293,6 +293,19 @@ class SignalAgentRuntime:
                             f"Groq review failed for '{failure.get('title', '?')}' ({failure.get('error_type', 'unknown')}).",
                             failure,
                         )
+                    # One event per signal whose analyst response had to be
+                    # coerced (missing/malformed artifact fields). High counts
+                    # indicate the analyst prompt is drifting or the model is
+                    # silently omitting fields the schema documents as required.
+                    coercion_events = list(state["analysis"].get("coercion_events", []))
+                    if coercion_events:
+                        self.storage.save_agent_event(
+                            run_id,
+                            "Analyst",
+                            "artifact_coerced",
+                            f"Coerced artifact fields on {len(coercion_events)} signal(s).",
+                            {"count": len(coercion_events), "samples": coercion_events[:5]},
+                        )
                     # Safety net: if the Critic has exhausted its revision rounds and
                     # the LLM keeps choosing analyze_articles instead of critique_digest,
                     # ship the best signals now rather than burning iterations until

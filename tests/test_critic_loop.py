@@ -33,13 +33,14 @@ class ScoreDigestQualityTest(unittest.TestCase):
         self.assertEqual(result["score"], 100)
         self.assertEqual(result["weak_indices"], [])
 
-    def test_missing_why_it_matters_flagged(self) -> None:
-        # Code path only checks structural integrity: is the field present at all?
-        # Content quality ("is it good?") belongs to the LLM Critic prompt in TOML.
+    def test_missing_why_it_matters_no_longer_flagged(self) -> None:
+        # why_it_matters was deprecated — strategic implication is folded into
+        # short_summary. The Critic no longer flags empty why_it_matters; only
+        # missing short_summary is a structural defect now.
         signals = [self._good_signal(why_it_matters="")]
         result = score_digest_quality(signals, critic_prompt="", llm=None, critic_mode="code")
-        self.assertIn(0, result["weak_indices"])
-        self.assertTrue(any("why_it_matters" in r for r in result["reasons"]))
+        self.assertEqual(result["weak_indices"], [])
+        self.assertEqual(result["reasons"], [])
 
     def test_missing_summary_flagged(self) -> None:
         # Same principle: missing summary is a structural failure, not a content judgment.
@@ -67,6 +68,8 @@ class ScoreDigestQualityTest(unittest.TestCase):
         self.assertNotIn(0, result["weak_indices"])
 
     def test_score_decreases_with_more_weak_signals(self) -> None:
+        # Missing short_summary is the only structural defect the Critic flags now
+        # (why_it_matters is deprecated).
         good = score_digest_quality(
             [self._good_signal() for _ in range(5)],
             critic_prompt="",
@@ -74,7 +77,7 @@ class ScoreDigestQualityTest(unittest.TestCase):
             critic_mode="code",
         )["score"]
         bad = score_digest_quality(
-            [self._good_signal(why_it_matters="") for _ in range(5)],
+            [self._good_signal(short_summary="") for _ in range(5)],
             critic_prompt="",
             llm=None,
             critic_mode="code",
@@ -127,14 +130,14 @@ class ScoreDigestQualityTest(unittest.TestCase):
                     "reasons": ["model found a duplicate entry"],
                 }
 
-        signals = [self._good_signal(), self._good_signal(why_it_matters="")]
+        signals = [self._good_signal(), self._good_signal(short_summary="")]
         result = score_digest_quality(
             signals,
             critic_prompt="test prompt",
             llm=FakeLLM(),
             critic_mode="hybrid",
         )
-        # Index 0 from model + index 1 from code (missing why_it_matters) should both appear.
+        # Index 0 from model + index 1 from code (missing short_summary) should both appear.
         self.assertIn(0, result["weak_indices"])
         self.assertIn(1, result["weak_indices"])
         self.assertEqual(len(result["reasons"]), 2)

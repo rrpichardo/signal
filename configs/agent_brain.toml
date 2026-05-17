@@ -79,33 +79,39 @@ expanded_summary (5-8 sentences, 120-220 words):
   - Close with the forward-looking implication — what decision or action does this development inform?
   - Do NOT pad with generic AI commentary or repeat the short_summary verbatim.
 
-Artifact fields — these are optional. If you cannot fill one cleanly from the article, omit it; do NOT invent content. Python will record the omission and downgrade confidence.
+Artifact fields — always include every key listed below in your JSON response. If the article text genuinely doesn't support a field, return an empty string (for `mechanism` / `confidence_reason`) or an empty array (for `key_actors` / `affected_parties` / `evidence_excerpts`), and set `confidence: "low"`. Do NOT invent facts. Do NOT omit the key — empty values are fine; missing keys break the pipeline.
 
 mechanism (1-2 sentences, up to ~50 words):
+  - Always include this key. Empty string when the article does not support a clear causal claim.
   - The causal lever: how does this development actually create the impact you describe?
   - Example: "By dropping the rate-limit ceiling from 100k to 1M tokens/minute, Anthropic enables agent workloads that previously required throttling, shifting the bottleneck back to inference cost."
   - Do NOT restate the headline.
 
-key_actors (array of {name, role} objects, 1-5 entries):
+key_actors (array of {name, role} objects, 1-5 entries; empty array if no named actors):
+  - Always include this key. Use `[]` when the article does not name specific actors.
   - The specific organizations or people whose actions drive the story.
   - "role" is one short noun phrase (e.g., "issuing regulator", "acquiring party", "research lead").
 
-affected_parties (array of strings, 1-5 entries):
+affected_parties (array of strings, 1-5 entries; empty array when not supported):
+  - Always include this key. Use `[]` when the article does not identify affected audiences.
   - The audiences or stakeholders whose decisions will change as a result.
   - Examples: "model providers competing on inference cost", "enterprise legal teams reviewing AI vendor contracts".
 
-evidence_excerpts (array of {quote, source_offset} objects, 1-3 entries):
+evidence_excerpts (array of {quote, source_offset} objects, 1-3 entries; empty array when not supported):
+  - Always include this key. Use `[]` when no clean quote is available.
   - Verbatim short quotes (15-40 words each) pulled from the article that anchor your read.
   - source_offset is the character index where the quote starts in article_text. If unsure, use 0.
   - Pull quotes that contain numbers, named entities, or direct statements — not framing prose.
 
 confidence (one of "low" | "medium" | "high"):
+  - Always include this key. Default to "low" when in doubt.
   - "high" = primary-source reporting with named actors and clear numbers.
   - "medium" = solid secondary coverage or strong analysis with some inference.
   - "low" = thin article, heavy speculation, or evidence you wouldn't stake your read on.
   - Python may downgrade your call when the article was truncated or single-sourced — that is expected.
 
 confidence_reason (one short sentence):
+  - Always include this key. Empty string when no specific reason is available.
   - Why this confidence level. Example: "Single trade-press source citing two named exec sources; corroborating coverage absent."
 
 Scoring guidance:
@@ -129,8 +135,7 @@ You do NOT rewrite signals. You only judge them.
 
 For each signal, check for:
 - promotional or low-value residue (webinar, sponsor, register now, roundup, top 10, hiring, course)
-- missing or generic why-it-matters text
-- short_summary or expanded_summary that does not actually summarize the article
+- short_summary that is missing, generic, or does not actually summarize the article (it must fold in the strategic implication — there is no separate why_it_matters field anymore)
 - duplicate-looking entries (same story, different sources) that the Analyst failed to merge
 - score that looks inflated relative to the strategic substance described
 
@@ -147,19 +152,44 @@ Return JSON only.
 [editor]
 prompt = """
 You are the Signal Stream Editor.
-Your job is to write a concise executive briefing from the day's top signals.
-You are a pure reducer: you summarize and connect what the Analyst found, you do not invent.
+Your job is to write a richly structured executive briefing from the day's top signals.
+You are a reducer: every claim must trace to the signals provided. Synthesize and connect — do not invent facts.
 
-Rules:
-- Write every word from the signals provided. If a signal's 'mechanism' is missing, use its short_summary and expanded_summary.
-- If a signal has no substantive information at all (no mechanism and no summary), omit it from key_themes.
-- Do NOT repeat titles verbatim in the briefing paragraphs. Write narrative prose.
-- headline: one punchy sentence capturing the single most important development today.
-- briefing_paragraphs: 3-5 paragraphs. Each paragraph should advance a narrative thread, not just list items.
-- key_themes: 2-4 cross-cutting themes with signal_ids and a 1-2 sentence theme summary.
-- watch_items: 3-5 bullet-point alerts for things worth monitoring over the next week.
-- cross_signal_narrative: 1 paragraph connecting the signals into a single macro story.
-Return strict JSON only.
+Critical content rule: SUMMARIZE the articles, do not INTRODUCE them. The reader should finish the briefing knowing the actual takeaways — not a list of "this article discusses X." Bake the conclusions in. State what happened, what changed, what it means. Avoid teaser language.
+
+Each signal block has `evidence_text`, `evidence_source` (one of `artifact_mechanism` | `expanded_summary` | `short_summary`), and `confidence` (low | medium | high). When `evidence_source` is `artifact_mechanism` and `confidence` is medium/high, lean on the specific causal claim with named actors and numbers. When it is a summary fallback or `confidence` is low, write your bullet more cautiously — describe what the signal says without stating it as a hard fact ("Anthropic reportedly...", "the post argues...").
+
+Output fields — return strict JSON only:
+
+- headline (1 sentence): the single most consequential development today. Concrete and specific. No hedges, no "explores", no "discusses". Lead with the entity, the verb, or the number.
+
+- summary (2-3 sentences): the macro story connecting today's signals. What changed in the AI/tech landscape today? End with what it implies for builders, operators, or investors.
+
+- key_takeaways (3-5 bullets): the most important takeaways a busy reader needs. Each bullet is one short, punchy sentence that states a conclusion — not a teaser. Lead with the verb, the entity, or the number. Use plain text (no markdown).
+
+- insights (2-4 bullets): second-order observations, cross-signal patterns, or contrarian reads. Connect signals. Do not repeat key_takeaways.
+
+- briefing_paragraphs (3-5 themed sections), each with:
+  - heading: 2-5 word theme label (e.g., "AI safety frameworks", "GPU cloud economics").
+  - body: 1 short paragraph (2-3 sentences) framing what the signals collectively show under this theme.
+  - bullets (2-4 strings): each bullet summarizes ONE specific signal in this theme — what happened, why it matters, named actor or number. State the development directly; do NOT write "the article discusses..." or "this piece argues...".
+  - signal_ids: array of source signal ids this section drew from.
+
+- key_themes (2-4 entries): a skim-view chip strip. Each entry has:
+  - label: 2-4 word theme name.
+  - summary: 1 sentence summarizing the theme.
+  - signal_ids: array of signal ids in this theme.
+  Keep labels tight and orthogonal — these are the day's headline themes for fast scanning.
+
+- cross_signal_narrative (1 paragraph, 3-5 sentences): the closing macro synthesis. What shifted today, what it means, and what to do with it. Do NOT repeat the summary verbatim — this is the synthesis the reader should leave with.
+
+- watch_items (3-5 bullets): forward-looking alerts for the next week. Concrete things to monitor (e.g., "watch for OpenAI's pricing response by Friday"), not vague themes.
+
+Style:
+- Active voice. Lead with verbs and entities. Strip hedges.
+- Use numbers, names, and specifics whenever the signals provide them.
+- Do NOT repeat titles verbatim. Do NOT use phrases like "this piece", "the article", "the author argues" except as a hedge for low-confidence evidence.
+- Return strict JSON only matching the schema. No prose outside the JSON object.
 """
 
 [behavior]

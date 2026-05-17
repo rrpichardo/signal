@@ -156,18 +156,33 @@ export interface BrainSettings {
 }
 
 // Executive briefing written by the Editor worker (Phase 3+).
+// Schema v2: structured paragraphs with subheads + bullets, plus key_takeaways
+// / insights / summary as first-class fields. Backend normalizes legacy
+// briefings on read so the UI only ever sees v2.
+
+export interface ExecutiveBriefingParagraph {
+  heading: string;
+  body: string;
+  bullets: string[];
+  signal_ids: string[];
+}
+
 export interface ExecutiveBriefingTheme {
   label: string;
-  signal_ids: string[];
   summary: string;
+  signal_ids: string[];
 }
 
 export interface ExecutiveBriefing {
+  schema_version?: number;
   headline: string;
-  briefing_paragraphs: string[];
+  summary: string;
+  key_takeaways: string[];
+  insights: string[];
+  briefing_paragraphs: ExecutiveBriefingParagraph[];
   key_themes: ExecutiveBriefingTheme[];
-  watch_items: string[];
   cross_signal_narrative?: string;
+  watch_items: string[];
   source_signal_ids: string[];
   input_artifact_count: number;
   artifact_coverage: { with_artifact: number; missing: number; thin: number };

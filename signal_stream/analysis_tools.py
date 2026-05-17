@@ -120,9 +120,6 @@ ANALYST_REVIEW_SCHEMA = {
                     "short_summary": {"type": "string"},
                     "expanded_summary": {"type": "string"},
                     "entities": {"type": "object"},
-                    # Phase 2: richer artifact fields. Optional on purpose —
-                    # if the model omits or truncates them the signal is still
-                    # accepted; Python post-validates and downgrades confidence.
                     "mechanism": {"type": "string"},
                     "key_actors": {
                         "type": "array",
@@ -148,14 +145,104 @@ ANALYST_REVIEW_SCHEMA = {
                     "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
                     "confidence_reason": {"type": "string"},
                 },
-                # why_it_matters dropped — strategic implication folded into short_summary.
-                # Keep it in storage and API for old-run compatibility.
-                "required": ["id", "score", "short_summary", "expanded_summary", "entities"],
+                # Documentation only — Groq's response_format=json_object does NOT
+                # enforce nested required fields. Runtime validation happens in
+                # _validate_analyst_item() below, which coerces missing artifact
+                # fields to safe defaults and tracks them in _meta.missing_fields.
+                "required": [
+                    "id", "score", "short_summary", "expanded_summary", "entities",
+                    "mechanism", "key_actors", "affected_parties", "evidence_excerpts",
+                    "confidence", "confidence_reason",
+                ],
             },
         }
     },
     "required": ["signals"],
 }
+
+
+# Required core fields the analyst must populate per signal. If any are missing
+# the item is rejected — the per-article review marks analyst_status='failed'.
+_ANALYST_CORE_REQUIRED: tuple[str, ...] = ("id", "short_summary", "expanded_summary")
+
+
+def _validate_analyst_item(raw_item: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """Coerce a single analyst response item into a stable shape.
+
+    Returns (validated_item, missing_artifact_fields). Raises ValueError when a
+    core field (id, short_summary, expanded_summary) is missing — those signals
+    must be marked failed by the caller. Artifact fields are always coerced to
+    safe defaults so downstream code never sees None/missing keys, with the list
+    of defaulted fields surfaced for observability.
+    """
+    if not isinstance(raw_item, dict):
+        raise ValueError(f"analyst item is not a dict: {type(raw_item).__name__}")
+
+    item = dict(raw_item)
+
+    # Core required fields — missing means the analyst response was unusable.
+    for field in _ANALYST_CORE_REQUIRED:
+        value = item.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            raise ValueError(f"analyst item missing required field: {field}")
+
+    missing_artifact: list[str] = []
+
+    # mechanism / confidence_reason — must be strings (possibly empty).
+    for field in ("mechanism", "confidence_reason"):
+        value = item.get(field)
+        if not isinstance(value, str):
+            item[field] = ""
+            missing_artifact.append(field)
+        elif not value.strip():
+            missing_artifact.append(field)
+
+    # confidence — must be one of low/medium/high; default low.
+    confidence = str(item.get("confidence", "")).strip().lower()
+    if confidence not in {"low", "medium", "high"}:
+        item["confidence"] = "low"
+        missing_artifact.append("confidence")
+    else:
+        item["confidence"] = confidence
+
+    # key_actors — must be list of dicts with name+role. Drop malformed entries.
+    key_actors = item.get("key_actors")
+    if not isinstance(key_actors, list):
+        item["key_actors"] = []
+        missing_artifact.append("key_actors")
+    else:
+        cleaned = [a for a in key_actors if isinstance(a, dict) and (a.get("name") or a.get("role"))]
+        item["key_actors"] = cleaned
+        if not cleaned:
+            missing_artifact.append("key_actors")
+
+    # affected_parties — must be list of non-empty strings.
+    affected = item.get("affected_parties")
+    if not isinstance(affected, list):
+        item["affected_parties"] = []
+        missing_artifact.append("affected_parties")
+    else:
+        cleaned = [str(p).strip() for p in affected if isinstance(p, (str, int, float)) and str(p).strip()]
+        item["affected_parties"] = cleaned
+        if not cleaned:
+            missing_artifact.append("affected_parties")
+
+    # evidence_excerpts — must be list of dicts with quote/source_offset.
+    evidence = item.get("evidence_excerpts")
+    if not isinstance(evidence, list):
+        item["evidence_excerpts"] = []
+        missing_artifact.append("evidence_excerpts")
+    else:
+        cleaned = [e for e in evidence if isinstance(e, dict) and isinstance(e.get("quote"), str) and e["quote"].strip()]
+        item["evidence_excerpts"] = cleaned
+        if not cleaned:
+            missing_artifact.append("evidence_excerpts")
+
+    # entities — must be a dict (the merge logic downstream handles shape).
+    if not isinstance(item.get("entities"), dict):
+        item["entities"] = {}
+
+    return item, missing_artifact
 
 SUMMARY_REPAIR_SCHEMA = {
     "type": "object",
@@ -225,7 +312,7 @@ def analyze_articles(
             urgency=_urgency(score, config.critical_threshold),
             event_type=draft.event_type,
             summary=short_summary,
-            why_it_matters="",  # LLM Analyst writes this; Critic flags it if empty.
+            why_it_matters="",  # Deprecated field — strategic implication is folded into short_summary.
             next_steps=[],
             matched_priorities=draft.matched_priorities,
             entities=draft.entities,
@@ -269,6 +356,22 @@ def analyze_articles(
     _promote_og_images(signals, review_context)
     signals.sort(key=lambda item: item.score, reverse=True)
     digest = render_digest(config, signals, trace.events)
+
+    # Surface per-signal artifact coercion so the activity log shows when the
+    # analyst response had to be defaulted (prompt drift, model omission, etc.).
+    coercion_events = []
+    for signal in signals:
+        artifact = signal.analyst_artifact if isinstance(signal.analyst_artifact, dict) else None
+        if not artifact:
+            continue
+        meta = artifact.get("_meta") or {}
+        if meta.get("coerced"):
+            coercion_events.append({
+                "signal_id": signal.id,
+                "title": signal.title,
+                "missing_fields": list(meta.get("missing_fields") or []),
+            })
+
     return {
         "article_count": len(normalized),
         "cluster_count": len(clusters),
@@ -279,6 +382,8 @@ def analyze_articles(
         "truncation_events": truncation_events,
         # Phase 3: per-signal Groq review failures for activity logging (selected signals only).
         "analyst_failures": analyst_failures,
+        # Phase 4: per-signal artifact coercion (analyst response missing/malformed fields).
+        "coercion_events": coercion_events,
         "trace": [{"agent": event.agent, "message": event.message, "metadata": event.metadata} for event in trace.events],
     }
 
@@ -603,18 +708,25 @@ def _build_artifact(signal: Signal, item: dict[str, Any]) -> dict[str, Any]:
                     "source_offset": int(entry.get("source_offset", 0)) if str(entry.get("source_offset", "")).lstrip("-").isdigit() else 0,
                 })
 
-    # Build the _meta block. We treat the model's "thin output" (missing optional
-    # fields or short mechanism) as a quality signal that Python can act on
-    # later — we record it here, not as an enum yet, but as a count.
-    missing_fields = []
-    if not mechanism:
-        missing_fields.append("mechanism")
-    if not key_actors:
-        missing_fields.append("key_actors")
-    if not affected_parties:
-        missing_fields.append("affected_parties")
-    if not evidence:
-        missing_fields.append("evidence_excerpts")
+    # Build the _meta block. The validator already recorded which artifact
+    # fields were defaulted to empty/low-confidence shapes when the model
+    # omitted or malformed them; prefer that list when present. Fall back to
+    # post-hoc inspection for legacy callers that bypass the validator.
+    validator_missing = item.get("_validator_missing_fields")
+    if isinstance(validator_missing, list):
+        missing_fields = list(validator_missing)
+        coerced = bool(missing_fields)
+    else:
+        missing_fields = []
+        if not mechanism:
+            missing_fields.append("mechanism")
+        if not key_actors:
+            missing_fields.append("key_actors")
+        if not affected_parties:
+            missing_fields.append("affected_parties")
+        if not evidence:
+            missing_fields.append("evidence_excerpts")
+        coerced = False
 
     chars_total = int(trunc_info.get("chars_total", 0))
     chars_sent = int(trunc_info.get("chars_sent", chars_total))
@@ -635,6 +747,7 @@ def _build_artifact(signal: Signal, item: dict[str, Any]) -> dict[str, Any]:
         "chars_sent": chars_sent,
         "extraction_quality": extraction_quality,
         "missing_fields": missing_fields,
+        "coerced": coerced,
     }
 
     # Apply Python's confidence-override rules. The model's own value is kept
@@ -930,16 +1043,37 @@ def _review_signals_in_chunks(
         for item in raw.get("signals", []):
             if not item.get("id"):
                 continue
+            # Validate + coerce the analyst item into a stable shape. Missing
+            # core fields → mark this signal failed (don't insert into reviewed).
+            # Missing artifact fields → coerce to safe defaults and stamp the
+            # defaulted-field list onto the item so _build_artifact can fold it
+            # into _meta for observability.
+            try:
+                validated, missing_artifact = _validate_analyst_item(item)
+            except ValueError as exc:
+                statuses[item["id"]] = {
+                    "status": "failed",
+                    "error_type": "invalid_response",
+                    "error_message": f"validator: {exc}"[:200],
+                    "last_attempt_at": now_iso,
+                }
+                print(
+                    f"[signal_stream] Analyst item {item.get('id')} failed validation: {exc}",
+                    file=sys.stderr,
+                )
+                continue
             # Stamp truncation info onto the returned item so the artifact builder
             # downstream can fold it into _meta without re-plumbing.
-            item["_truncation"] = dict(trunc_info)
-            reviewed[item["id"]] = item
-            statuses[item["id"]] = {
+            validated["_truncation"] = dict(trunc_info)
+            validated["_validator_missing_fields"] = missing_artifact
+            reviewed[validated["id"]] = validated
+            statuses[validated["id"]] = {
                 "status": "success",
                 "error_type": None,
                 "error_message": None,
                 "last_attempt_at": now_iso,
             }
+            item = validated
             # Only surface a truncation_event when the fallback actually fired —
             # one event per signal in the truncated chunk so the activity log
             # shows which articles got cut down.
@@ -1917,12 +2051,9 @@ def score_digest_quality(
     for idx, signal in enumerate(signals):
         problems: list[str] = []
 
-        # A missing why_it_matters means the LLM Analyst didn't run or failed.
-        why = str(signal.get("why_it_matters", "")).strip()
-        if not why:
-            problems.append("why_it_matters is missing — Analyst did not complete this field")
-
-        # A missing summary means the signal has no usable content at all.
+        # short_summary is the only required Analyst-written field. Strategic
+        # implication is folded into it per the current prompt; the legacy
+        # why_it_matters field is intentionally left blank.
         summary = str(signal.get("short_summary", signal.get("summary", ""))).strip()
         if not summary:
             problems.append("short_summary is missing — signal has no content")
@@ -1942,6 +2073,8 @@ def score_digest_quality(
     if critic_mode in {"hybrid", "model"} and llm is not None:
         try:
             if llm.available():
+                # why_it_matters is deprecated — the strategic implication is
+                # folded into short_summary, so we no longer surface it to Groq.
                 signal_summary = json.dumps(
                     [
                         {
@@ -1949,7 +2082,6 @@ def score_digest_quality(
                             "title": s.get("title", ""),
                             "score": s.get("score", 0),
                             "short_summary": s.get("short_summary", s.get("summary", ""))[:200],
-                            "why_it_matters": s.get("why_it_matters", "")[:150],
                         }
                         for i, s in enumerate(signals)
                     ],
