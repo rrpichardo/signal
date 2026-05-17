@@ -110,3 +110,40 @@ export function useSaveBrain() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }),
   });
 }
+
+export function useSources() {
+  return useQuery({ queryKey: ["sources"], queryFn: api.sources });
+}
+
+export function useTestSource() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.testSource(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["sources"] }),
+  });
+}
+
+export function useTestAllSources() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.testAllSources,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["sources"] }),
+  });
+}
+
+export function useToggleSource() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
+      api.toggleSource(id, enabled),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["sources"] }),
+  });
+}
+
+export function useRemoveSource() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.removeSource(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["sources"] }),
+  });
+}

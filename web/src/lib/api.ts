@@ -11,6 +11,9 @@ import type {
   MemoryItem,
   Signal,
   SignalsResponse,
+  Source,
+  SourceTestResult,
+  TestAllResult,
   ToolCall,
 } from "./types";
 
@@ -78,4 +81,43 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ raw }),
     }),
+  sources: () => http<Source[]>("/api/sources"),
+  testSource: (id: string) =>
+    http<SourceTestResult>(`/api/sources/${encodeURIComponent(id)}/test`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+  testAllSources: () =>
+    http<TestAllResult>("/api/sources/test-all", {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+  toggleSource: (id: string, enabled: boolean) =>
+    http<{ status: string; source_id: string; enabled: boolean }>(
+      `/api/sources/${encodeURIComponent(id)}/toggle`,
+      {
+        method: "POST",
+        body: JSON.stringify({ enabled }),
+      },
+    ),
+  addSource: (source: {
+    name: string;
+    kind: string;
+    group?: string;
+    url?: string;
+    limit?: number;
+    on_demand?: boolean;
+  }) =>
+    http<{ status: string; source_id: string }>("/api/sources/add", {
+      method: "POST",
+      body: JSON.stringify(source),
+    }),
+  removeSource: (id: string) =>
+    http<{ status: string; removed: string }>(
+      `/api/sources/${encodeURIComponent(id)}/remove`,
+      {
+        method: "POST",
+        body: JSON.stringify({}),
+      },
+    ),
 };
