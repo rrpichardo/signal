@@ -173,8 +173,20 @@ class SignalAgentRuntime:
     def run(self, goal: str | None = None) -> dict[str, Any]:
         self.storage.init()
         goal = goal or "Surface today's highest-signal AI/tech developments and prepare a digest."
+
+        # Seed source registry from TOML; idempotent — existing rows keep their SQLite-owned enabled state.
+        self.storage.init_sources_from_config(self.config.sources)
+
+        # Load the working source list from the registry instead of raw config.
+        source_records = self.storage.list_sources(include_disabled=False)
+        from signal_stream.source_registry import source_record_to_config
+        sources_for_run = [source_record_to_config(r) for r in source_records]
+
         run_id = self.storage.start_agent_run(goal)
         self.storage.save_agent_event(run_id, "Orchestrator", "start", "Started local agent run.", {"goal": goal})
+
+        # Health-check enabled sources before dispatching Scout.
+        self._check_sources_before_run(source_records, run_id)
         _run_completed = False
 
         if self.config.agent.require_brain and not self.llm.available():
@@ -221,7 +233,7 @@ class SignalAgentRuntime:
                 if decision.action == "collect_sources":
                     # Step 2a: Scout gathers raw source material. The Orchestrator
                     # does not know how to fetch RSS or YouTube; Scout does.
-                    result = self._call_worker(run_id, scout, "collect_sources", {"sources": [asdict(source) for source in self.config.sources]})
+                    result = self._call_worker(run_id, scout, "collect_sources", {"sources": [asdict(source) for source in sources_for_run]})
                     state["articles"] = _merge_articles(state["articles"], result.get("data", {}).get("articles", []))
                     self.storage.save_agent_event(run_id, "Scout", "observation", "Collected configured sources.", _compact_result(result))
                     # Surface any per-source cap warnings as their own timeline
@@ -598,6 +610,29 @@ class SignalAgentRuntime:
             err = f"{type(exc).__name__}: {exc}"
             self.storage.save_agent_event(run_id, "Editor", "failed", f"Unexpected error: {err}", {"error": err})
             return None, "failed", err
+
+    def _check_sources_before_run(self, source_records: list, run_id: str) -> None:
+        """Health-check enabled sources before a run; log failures to agent_events."""
+        from signal_stream.source_health import check_source_health
+        failed = []
+        for record in source_records:
+            result = check_source_health(record)
+            self.storage.save_source_health(result)
+            if result.status in ("error", "paywall"):
+                failed.append({
+                    "name": result.source_name,
+                    "status": result.status,
+                    "error": result.error_msg,
+                })
+        if failed:
+            # Use the same event-logging pattern as the rest of this file.
+            self.storage.save_agent_event(
+                run_id,
+                "Orchestrator",
+                "source_health_warning",
+                f"{len(failed)} source(s) have issues before run",
+                {"sources": failed},
+            )
 
     def _write_digest(self, run_id: str, state: dict[str, Any]) -> str:
         output_dir = Path(self.config.output_dir)

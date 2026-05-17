@@ -126,6 +126,9 @@ def serve_dashboard(
     storage = SignalStorage(config.storage_path)
     storage.init()
 
+    # Seed source registry from TOML on startup; idempotent.
+    storage.init_sources_from_config(config.sources)
+
     target_port = port or config.agent.dashboard_port
     server = ThreadingHTTPServer((host, target_port), _handler(storage, config, config_path))
 
