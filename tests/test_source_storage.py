@@ -1,26 +1,12 @@
 # tests/test_source_storage.py
 # Tests for the sources and source_health tables added to SignalStorage.
-# SourceHealthResult is defined inline here so this file doesn't depend on
-# Task 3 (signal_stream/source_health.py) being complete yet.
 
 import os
 import tempfile
 import unittest
 from dataclasses import dataclass
 
-
-# ── Inline stub — mirrors the real SourceHealthResult from Task 3 ─────────────
-# Once source_health.py is created, this stub can be replaced with a real import.
-@dataclass
-class SourceHealthResult:
-    source_id: str
-    source_name: str
-    checked_at: str
-    status: str
-    error_msg: str
-    article_count: int
-    paywall_detected: bool
-    confidence: float
+from signal_stream.source_health import SourceHealthResult
 
 
 # ── Fake source config — mimics a TOML SourceConfig object ───────────────────
