@@ -5,17 +5,18 @@ from pathlib import Path
 import tomllib
 from typing import Any
 
-from .prompts import ANALYST_PROMPT, CRITIC_PROMPT, ORCHESTRATOR_PROMPT, SCOUT_PROMPT
+from .prompts import ANALYST_PROMPT, CRITIC_PROMPT, EDITOR_PROMPT, ORCHESTRATOR_PROMPT, SCOUT_PROMPT
 
 
-# Adding "critic" here makes the Critic worker discoverable everywhere prompts
-# are loaded: agent runtime, worker startup, dashboard settings page, and the
-# brain-file render below.
+# Adding a new agent here makes its prompt discoverable everywhere they are
+# loaded: agent runtime, worker startup, dashboard Settings page, and the
+# brain-file render below. "editor" drives the executive-briefing generator.
 DEFAULT_PROMPTS = {
     "orchestrator": ORCHESTRATOR_PROMPT,
     "scout": SCOUT_PROMPT,
     "analyst": ANALYST_PROMPT,
     "critic": CRITIC_PROMPT,
+    "editor": EDITOR_PROMPT,
 }
 
 DEFAULT_SCORING_RUBRIC: dict[str, Any] = {
@@ -394,9 +395,9 @@ def _render_brain_toml(
         "# The dashboard Settings page edits this same file.",
         "",
     ]
-    # Iterate over all four agent prompt sections so the editable brain file
-    # always exposes the Critic alongside the other three.
-    for name in ("orchestrator", "scout", "analyst", "critic"):
+    # Iterate over every agent prompt section so the editable brain file
+    # always exposes all of them (Editor included — it drives the briefing).
+    for name in ("orchestrator", "scout", "analyst", "critic", "editor"):
         lines.extend([f"[{name}]", 'prompt = """', str(prompts.get(name, "")).strip(), '"""', ""])
 
     lines.extend(
