@@ -38,7 +38,7 @@ export function PromptsForm({ settings, onChange }: PromptsFormProps) {
         />
       </FieldRow>
 
-      <FieldRow id="prompt_analyst" label="Analyst prompt" help="Guides the Analyst when scoring and ranking signals.">
+      <FieldRow id="prompt_analyst" label="Analyst prompt" help="Drives scoring, ranking, and the per-signal short_summary / expanded_summary the digest cards show.">
         <Textarea
           id="prompt_analyst"
           rows={8}
@@ -54,6 +54,16 @@ export function PromptsForm({ settings, onChange }: PromptsFormProps) {
           rows={8}
           value={prompts.critic ?? ""}
           onChange={(e) => patch("critic", e.target.value)}
+          className="font-mono text-xs"
+        />
+      </FieldRow>
+
+      <FieldRow id="prompt_editor" label="Editor prompt" help="Writes the executive briefing (headline, themed paragraphs, watch items) from the day's top signals.">
+        <Textarea
+          id="prompt_editor"
+          rows={8}
+          value={prompts.editor ?? ""}
+          onChange={(e) => patch("editor", e.target.value)}
           className="font-mono text-xs"
         />
       </FieldRow>

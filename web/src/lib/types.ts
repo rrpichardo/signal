@@ -149,7 +149,7 @@ export interface DisplaySettings {
 export interface BrainSettings {
   raw: string;
   behavior?: Record<string, unknown>;
-  prompts?: { orchestrator?: string; scout?: string; analyst?: string; critic?: string };
+  prompts?: { orchestrator?: string; scout?: string; analyst?: string; critic?: string; editor?: string };
   scoring?: Record<string, unknown>;
   reader?: Record<string, unknown>;
   [key: string]: unknown;
