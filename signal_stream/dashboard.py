@@ -6,6 +6,7 @@ import mimetypes
 import os
 import pathlib
 from pathlib import Path
+import re
 import signal
 import threading
 from urllib.parse import parse_qs, urlparse
@@ -371,6 +372,9 @@ def _handler(storage: SignalStorage, config: SignalConfig, config_path: str = "c
                 # Polled by the Run button to show live running indicator.
                 self._json({"running": _run_state["running"], "error": _run_state["error"]})
                 return
+            if path == "/api/sources":
+                self._handle_get_sources()
+                return
             self.send_response(404)
             self.end_headers()
 
@@ -405,6 +409,26 @@ def _handler(storage: SignalStorage, config: SignalConfig, config_path: str = "c
                         }
                     )
                     return
+                # Literal source routes come before regex routes to avoid false matches.
+                if path == "/api/sources/add":
+                    self._handle_add_source(payload)
+                    return
+                if path == "/api/sources/test-all":
+                    self._handle_test_all_sources()
+                    return
+                # Regex routes for paths with a source ID segment.
+                if re.match(r"^/api/sources/[^/]+/test$", path):
+                    source_id = path.split("/")[3]
+                    self._handle_test_source(source_id)
+                    return
+                if re.match(r"^/api/sources/[^/]+/toggle$", path):
+                    source_id = path.split("/")[3]
+                    self._handle_toggle_source(source_id, payload)
+                    return
+                if re.match(r"^/api/sources/[^/]+/remove$", path):
+                    source_id = path.split("/")[3]
+                    self._handle_remove_source(source_id)
+                    return
             except Exception as exc:  # noqa: BLE001 - dashboard should report save errors as JSON.
                 self.send_response(400)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -413,6 +437,143 @@ def _handler(storage: SignalStorage, config: SignalConfig, config_path: str = "c
                 return
             self.send_response(404)
             self.end_headers()
+
+        # ------------------------------------------------------------------
+        # Source management handlers — backed by the SQLite source registry.
+        # ------------------------------------------------------------------
+
+        def _handle_get_sources(self) -> None:
+            """Return all sources with their latest health snapshot."""
+            all_health = storage.get_all_latest_source_health()
+            records = storage.list_sources(include_disabled=True)
+            out = []
+            for r in records:
+                health = all_health.get(r.id)
+                out.append({
+                    "id": r.id,
+                    "name": r.name,
+                    "kind": r.kind,
+                    "group": r.group_name,
+                    "url": r.url,
+                    "path": r.path,
+                    "channel_id": r.channel_id,
+                    "limit": r.limit_count,
+                    "enabled": r.enabled,
+                    "on_demand": r.on_demand,
+                    "origin": r.origin,
+                    "health": health,
+                })
+            self._json(out)
+
+        def _handle_test_source(self, source_id: str) -> None:
+            """Health-check a single source and persist the result."""
+            record = storage.get_source(source_id)
+            if record is None:
+                self._send_error(404, f"Source not found: {source_id}")
+                return
+            from signal_stream.source_health import check_source_health
+            result = check_source_health(record)
+            storage.save_source_health(result)
+            self._json({
+                "source_id": result.source_id,
+                "source_name": result.source_name,
+                "status": result.status,
+                "checked_at": result.checked_at,
+                "article_count": result.article_count,
+                "paywall_detected": result.paywall_detected,
+                "error_msg": result.error_msg,
+                "confidence": result.confidence,
+            })
+
+        def _handle_test_all_sources(self) -> None:
+            """Health-check all enabled sources in parallel and persist results."""
+            import concurrent.futures
+            from signal_stream.source_health import check_source_health
+            records = storage.list_sources(include_disabled=False)
+            results = []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+                futures = {pool.submit(check_source_health, r): r for r in records}
+                for future in concurrent.futures.as_completed(futures):
+                    try:
+                        res = future.result()
+                        storage.save_source_health(res)
+                        results.append({
+                            "source_id": res.source_id,
+                            "source_name": res.source_name,
+                            "status": res.status,
+                            "checked_at": res.checked_at,
+                            "article_count": res.article_count,
+                            "paywall_detected": res.paywall_detected,
+                            "error_msg": res.error_msg,
+                        })
+                    except Exception as exc:  # noqa: BLE001 - partial failure; continue other sources.
+                        rec = futures[future]
+                        results.append({
+                            "source_id": rec.id,
+                            "source_name": rec.name,
+                            "status": "error",
+                            "error_msg": str(exc),
+                        })
+            self._json({"results": results})
+
+        def _handle_toggle_source(self, source_id: str, body: dict) -> None:
+            """Enable or disable a source."""
+            enabled = bool(body.get("enabled", True))
+            found = storage.toggle_source(source_id, enabled)
+            if not found:
+                self._send_error(404, f"Source not found: {source_id}")
+                return
+            self._json({"status": "ok", "source_id": source_id, "enabled": enabled})
+
+        def _handle_add_source(self, body: dict) -> None:
+            """Create a new manually-defined source in the registry."""
+            required = ["name", "kind"]
+            missing = [k for k in required if not body.get(k)]
+            if missing:
+                self._send_error(400, f"Missing required fields: {missing}")
+                return
+            from signal_stream.source_registry import SourceRecord, generate_source_id
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc).isoformat()
+            source_id = generate_source_id(
+                "manual", body["name"], body["kind"],
+                body.get("url"), body.get("path"), body.get("channel_id"),
+            )
+            record = SourceRecord(
+                id=source_id,
+                name=body["name"],
+                kind=body["kind"],
+                group_name=body.get("group", "general"),
+                url=body.get("url"),
+                path=body.get("path"),
+                channel_id=body.get("channel_id"),
+                article_link_pattern=body.get("article_link_pattern"),
+                limit_count=int(body.get("limit", 8)),
+                enabled=True,
+                on_demand=bool(body.get("on_demand", False)),
+                origin="manual",
+                created_at=now,
+                updated_at=now,
+            )
+            storage.add_source(record)
+            self._json({"status": "ok", "source_id": source_id})
+
+        def _handle_remove_source(self, source_id: str) -> None:
+            """Soft-delete a source (marks it deleted, does not erase history)."""
+            found = storage.soft_delete_source(source_id)
+            if not found:
+                self._send_error(404, f"Source not found: {source_id}")
+                return
+            self._json({"status": "ok", "removed": source_id})
+
+        def _send_error(self, status: int, message: str) -> None:
+            """Write a JSON error response with the given HTTP status code."""
+            body = json.dumps({"error": message}).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
         def log_message(self, format: str, *args: object) -> None:
             return
