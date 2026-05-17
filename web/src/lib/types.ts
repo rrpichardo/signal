@@ -201,3 +201,44 @@ export interface ExecutiveBriefingResponse {
   stale_from_run_id: string | null;
   stale_run_started_at: string | null;
 }
+
+export interface SourceHealth {
+  source_id: string;
+  status: "ok" | "error" | "paywall" | "empty" | "skipped" | null;
+  checked_at: string | null;
+  article_count: number;
+  paywall_detected: boolean;
+  error_msg: string;
+  confidence: number;
+}
+
+export interface Source {
+  id: string;
+  name: string;
+  kind: "rss" | "atom" | "youtube" | "html_scrape" | "sample" | "report";
+  group: string;
+  url: string | null;
+  path: string | null;
+  channel_id: string | null;
+  limit: number;
+  enabled: boolean;
+  on_demand: boolean;
+  // "toml" = static config, "manual" = added via UI, "discovered" = Phase 2
+  origin: "toml" | "manual" | "discovered";
+  health: SourceHealth | null;
+}
+
+export interface SourceTestResult {
+  source_id: string;
+  source_name: string;
+  status: SourceHealth["status"];
+  checked_at: string;
+  article_count: number;
+  paywall_detected: boolean;
+  error_msg: string;
+  confidence: number;
+}
+
+export interface TestAllResult {
+  results: SourceTestResult[];
+}
