@@ -185,6 +185,19 @@ class SignalAgentRuntime:
         run_id = self.storage.start_agent_run(goal)
         self.storage.save_agent_event(run_id, "Orchestrator", "start", "Started local agent run.", {"goal": goal})
 
+        # Guard: abort immediately when no sources are enabled — Scout would produce
+        # zero articles with no explanation, leaving a silent empty run in the DB.
+        if not source_records:
+            self.storage.save_agent_event(
+                run_id,
+                "Orchestrator",
+                "error",
+                "No enabled sources found. Enable at least one source before running.",
+                {},
+            )
+            self.storage.finish_agent_run(run_id, "failed", {"reason": "No enabled sources."})
+            return {"run_id": run_id, "output_path": "", "articles": 0, "signals": 0}
+
         # Health-check enabled sources before dispatching Scout.
         self._check_sources_before_run(source_records, run_id)
         _run_completed = False
@@ -612,18 +625,32 @@ class SignalAgentRuntime:
             return None, "failed", err
 
     def _check_sources_before_run(self, source_records: list, run_id: str) -> None:
-        """Health-check enabled sources before a run; log failures to agent_events."""
+        """Health-check enabled sources in parallel before a run; log failures to agent_events."""
+        import concurrent.futures
         from signal_stream.source_health import check_source_health
+
         failed = []
-        for record in source_records:
-            result = check_source_health(record)
-            self.storage.save_source_health(result)
-            if result.status in ("error", "paywall"):
-                failed.append({
-                    "name": result.source_name,
-                    "status": result.status,
-                    "error": result.error_msg,
-                })
+        # Run health checks concurrently — with 22 sources each doing a live HTTP
+        # fetch, sequential checks can block run start for 44–110+ seconds.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(check_source_health, record): record for record in source_records}
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    result = future.result()
+                    self.storage.save_source_health(result)
+                    if result.status in ("error", "paywall"):
+                        failed.append({
+                            "name": result.source_name,
+                            "status": result.status,
+                            "error": result.error_msg,
+                        })
+                except Exception as exc:  # noqa: BLE001 - surface per-source errors without aborting the batch
+                    record = futures[future]
+                    failed.append({
+                        "name": record.name,
+                        "status": "error",
+                        "error": str(exc),
+                    })
         if failed:
             # Use the same event-logging pattern as the rest of this file.
             self.storage.save_agent_event(
