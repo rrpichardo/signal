@@ -127,6 +127,36 @@ class SignalStorage:
                     signal_id text,
                     created_at text not null
                 );
+
+                create table if not exists sources (
+                    id text primary key,
+                    name text not null,
+                    kind text not null,
+                    group_name text not null default 'general',
+                    url text,
+                    path text,
+                    channel_id text,
+                    article_link_pattern text,
+                    limit_count integer not null default 25,
+                    enabled integer not null default 1,
+                    on_demand integer not null default 0,
+                    origin text not null default 'toml',
+                    created_at text not null,
+                    updated_at text not null,
+                    deleted_at text
+                );
+
+                create table if not exists source_health (
+                    id integer primary key autoincrement,
+                    source_id text not null,
+                    checked_at text not null,
+                    status text not null,
+                    error_msg text default '',
+                    article_count integer default 0,
+                    paywall_detected integer default 0,
+                    confidence real default 0.0,
+                    foreign key(source_id) references sources(id)
+                );
                 """
             )
             _ensure_column(conn, "signals", "score_breakdown_json", "text")
@@ -1054,3 +1084,194 @@ class SignalStorage:
                 (limit,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    # ── Source registry ───────────────────────────────────────────────────────
+
+    def init_sources_from_config(self, sources: list) -> None:
+        """Seed the sources table from a TOML config list.
+
+        New sources: inserted with their TOML-specified enabled state.
+        Existing sources: structural fields synced; `enabled` NOT overwritten
+        (SQLite owns that after the first import so toggling from the UI sticks).
+        """
+        from signal_stream.source_registry import source_config_to_record
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connect() as conn:
+            for source in sources:
+                record = source_config_to_record(source, origin="toml")
+                conn.execute("""
+                    insert into sources
+                        (id, name, kind, group_name, url, path, channel_id,
+                         article_link_pattern, limit_count, enabled, on_demand,
+                         origin, created_at, updated_at)
+                    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    on conflict(id) do update set
+                        name = excluded.name,
+                        url = excluded.url,
+                        path = excluded.path,
+                        channel_id = excluded.channel_id,
+                        article_link_pattern = excluded.article_link_pattern,
+                        limit_count = excluded.limit_count,
+                        updated_at = ?
+                """, (
+                    record.id, record.name, record.kind, record.group_name,
+                    record.url, record.path, record.channel_id,
+                    record.article_link_pattern, record.limit_count,
+                    # Store booleans as integers — SQLite has no native bool type.
+                    1 if record.enabled else 0, 1 if record.on_demand else 0,
+                    record.origin, record.created_at, record.updated_at,
+                    # Extra bind value for the ON CONFLICT updated_at = ? clause.
+                    now,
+                ))
+
+    def list_sources(self, include_disabled: bool = False) -> list:
+        """Return SourceRecord list. Always excludes soft-deleted rows."""
+        sql = """
+            select id, name, kind, group_name, url, path, channel_id,
+                   article_link_pattern, limit_count, enabled, on_demand,
+                   origin, created_at, updated_at, deleted_at
+            from sources
+            where deleted_at is null
+        """
+        if not include_disabled:
+            # Filter to only enabled sources when the caller doesn't want disabled ones.
+            sql += " and enabled = 1"
+        sql += " order by name"
+        with self.connect() as conn:
+            rows = conn.execute(sql).fetchall()
+        return [_row_to_source_record(row) for row in rows]
+
+    def get_source(self, source_id: str):
+        """Return a SourceRecord by id, or None if not found or soft-deleted."""
+        with self.connect() as conn:
+            row = conn.execute("""
+                select id, name, kind, group_name, url, path, channel_id,
+                       article_link_pattern, limit_count, enabled, on_demand,
+                       origin, created_at, updated_at, deleted_at
+                from sources where id = ? and deleted_at is null
+            """, (source_id,)).fetchone()
+        return _row_to_source_record(row) if row else None
+
+    def add_source(self, record) -> None:
+        """Insert a new manually-created source."""
+        with self.connect() as conn:
+            conn.execute("""
+                insert into sources
+                    (id, name, kind, group_name, url, path, channel_id,
+                     article_link_pattern, limit_count, enabled, on_demand,
+                     origin, created_at, updated_at)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                record.id, record.name, record.kind, record.group_name,
+                record.url, record.path, record.channel_id,
+                record.article_link_pattern, record.limit_count,
+                1 if record.enabled else 0, 1 if record.on_demand else 0,
+                record.origin, record.created_at, record.updated_at,
+            ))
+
+    def toggle_source(self, source_id: str, enabled: bool) -> bool:
+        """Set enabled flag. Returns False if source not found or soft-deleted."""
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connect() as conn:
+            cursor = conn.execute("""
+                update sources set enabled = ?, updated_at = ?
+                where id = ? and deleted_at is null
+            """, (1 if enabled else 0, now, source_id))
+        # rowcount > 0 means a row was matched and updated.
+        return cursor.rowcount > 0
+
+    def soft_delete_source(self, source_id: str) -> bool:
+        """Soft-delete a source by stamping deleted_at. Returns False if not found."""
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connect() as conn:
+            cursor = conn.execute("""
+                update sources set deleted_at = ?, updated_at = ?
+                where id = ? and deleted_at is null
+            """, (now, now, source_id))
+        return cursor.rowcount > 0
+
+    # ── Source health ─────────────────────────────────────────────────────────
+
+    def save_source_health(self, result) -> None:
+        """Persist one health check result keyed by source_id."""
+        with self.connect() as conn:
+            conn.execute("""
+                insert into source_health
+                    (source_id, checked_at, status, error_msg, article_count,
+                     paywall_detected, confidence)
+                values (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                result.source_id, result.checked_at, result.status,
+                result.error_msg, result.article_count,
+                # Coerce paywall_detected to int for SQLite storage.
+                1 if result.paywall_detected else 0, result.confidence,
+            ))
+
+    def get_latest_source_health(self, source_id: str) -> dict | None:
+        """Return the most recent health row for a source_id, or None."""
+        with self.connect() as conn:
+            row = conn.execute("""
+                select source_id, checked_at, status, error_msg,
+                       article_count, paywall_detected, confidence
+                from source_health where source_id = ?
+                order by checked_at desc limit 1
+            """, (source_id,)).fetchone()
+        if row is None:
+            return None
+        keys = ["source_id", "checked_at", "status", "error_msg",
+                "article_count", "paywall_detected", "confidence"]
+        d = dict(zip(keys, row))
+        # Convert paywall_detected back to bool for callers.
+        d["paywall_detected"] = bool(d["paywall_detected"])
+        return d
+
+    def get_all_latest_source_health(self) -> dict[str, dict]:
+        """Return {source_id: health_row} for the latest check of each source."""
+        with self.connect() as conn:
+            rows = conn.execute("""
+                select source_id, checked_at, status, error_msg,
+                       article_count, paywall_detected, confidence
+                from source_health h1
+                where checked_at = (
+                    select max(checked_at) from source_health h2
+                    where h2.source_id = h1.source_id
+                )
+            """).fetchall()
+        keys = ["source_id", "checked_at", "status", "error_msg",
+                "article_count", "paywall_detected", "confidence"]
+        result = {}
+        for row in rows:
+            d = dict(zip(keys, row))
+            d["paywall_detected"] = bool(d["paywall_detected"])
+            result[d["source_id"]] = d
+        return result
+
+
+# ── Module-level helper — lives outside the class so it can be reused without
+# instantiating SignalStorage (e.g. from tests or other modules).
+
+def _row_to_source_record(row):
+    """Convert a raw SQLite row tuple to a SourceRecord.
+
+    Column order must match the SELECT list used by all source queries:
+    id, name, kind, group_name, url, path, channel_id, article_link_pattern,
+    limit_count, enabled, on_demand, origin, created_at, updated_at, deleted_at.
+    """
+    from signal_stream.source_registry import SourceRecord
+    # Unpack positionally — the SELECT order in every source query is fixed.
+    (id_, name, kind, group_name, url, path, channel_id, article_link_pattern,
+     limit_count, enabled, on_demand, origin, created_at, updated_at, deleted_at) = row
+    return SourceRecord(
+        id=id_, name=name, kind=kind, group_name=group_name,
+        url=url, path=path, channel_id=channel_id,
+        article_link_pattern=article_link_pattern,
+        limit_count=limit_count,
+        # SQLite stores booleans as 0/1 integers; convert back to Python bool.
+        enabled=bool(enabled),
+        on_demand=bool(on_demand),
+        origin=origin,
+        created_at=created_at, updated_at=updated_at, deleted_at=deleted_at,
+    )
