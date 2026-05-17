@@ -140,6 +140,24 @@ class TestSourceStorage(unittest.TestCase):
         all_health = self.storage.get_all_latest_source_health()
         self.assertEqual(len(all_health), 2)
 
+    def test_get_all_latest_health_with_duplicate_timestamps(self):
+        """Two health rows with the same checked_at should not duplicate the result."""
+        self.storage.init_sources_from_config([FakeSourceConfig("Feed A")])
+        row = self.storage.list_sources(include_disabled=True)[0]
+        # Insert two rows for the same source with the identical checked_at timestamp.
+        # The MAX(id) tiebreaker must collapse them to a single dict entry.
+        same_ts = "2026-01-01T00:00:00+00:00"
+        for status in ("ok", "error"):
+            result = SourceHealthResult(
+                source_id=row.id, source_name="Feed A",
+                checked_at=same_ts, status=status, error_msg="",
+                article_count=0, paywall_detected=False, confidence=0.9,
+            )
+            self.storage.save_source_health(result)
+        all_health = self.storage.get_all_latest_source_health()
+        # Only one entry in the result dict — the later insert wins, not two entries.
+        self.assertEqual(len(all_health), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

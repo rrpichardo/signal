@@ -1108,6 +1108,8 @@ class SignalStorage:
                     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     on conflict(id) do update set
                         name = excluded.name,
+                        kind = excluded.kind,
+                        group_name = excluded.group_name,
                         url = excluded.url,
                         path = excluded.path,
                         channel_id = excluded.channel_id,
@@ -1154,10 +1156,10 @@ class SignalStorage:
         return _row_to_source_record(row) if row else None
 
     def add_source(self, record) -> None:
-        """Insert a new manually-created source."""
+        """Insert a new manually-created source. Silently ignores duplicates."""
         with self.connect() as conn:
             conn.execute("""
-                insert into sources
+                insert or ignore into sources
                     (id, name, kind, group_name, url, path, channel_id,
                      article_link_pattern, limit_count, enabled, on_demand,
                      origin, created_at, updated_at)
@@ -1229,15 +1231,19 @@ class SignalStorage:
         return d
 
     def get_all_latest_source_health(self) -> dict[str, dict]:
-        """Return {source_id: health_row} for the latest check of each source."""
+        """Return {source_id: health_row} for the latest check of each source.
+
+        Uses MAX(id) as the tiebreaker instead of MAX(checked_at) so that two
+        rows sharing an identical timestamp don't produce duplicate dict entries
+        (id is autoincrement, so the higher id is always the later insert).
+        """
         with self.connect() as conn:
             rows = conn.execute("""
                 select source_id, checked_at, status, error_msg,
                        article_count, paywall_detected, confidence
-                from source_health h1
-                where checked_at = (
-                    select max(checked_at) from source_health h2
-                    where h2.source_id = h1.source_id
+                from source_health
+                where id in (
+                    select max(id) from source_health group by source_id
                 )
             """).fetchall()
         keys = ["source_id", "checked_at", "status", "error_msg",
