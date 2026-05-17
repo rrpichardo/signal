@@ -577,19 +577,19 @@ class TestArtifactWithMissingOptionalFields(unittest.TestCase):
 
 
 class TestAnalystSchemaIncludesArtifactFields(unittest.TestCase):
-    def test_optional_artifact_fields_not_required(self) -> None:
-        """The new fields are present in properties but NOT in required, so missing values don't drop the signal."""
+    def test_artifact_fields_listed_required_for_documentation(self) -> None:
+        """Artifact fields are documented as required in the schema, but enforcement
+        happens at runtime in _validate_analyst_item (Groq's response_format=json_object
+        does not enforce nested required arrays). The schema 'required' list is
+        documentation for human readers + the prompt."""
         from signal_stream.analysis_tools import ANALYST_REVIEW_SCHEMA
 
         item_schema = ANALYST_REVIEW_SCHEMA["properties"]["signals"]["items"]
         props = item_schema["properties"]
-        # New fields exist in the schema.
-        for field in ("mechanism", "key_actors", "affected_parties", "evidence_excerpts", "confidence", "confidence_reason"):
-            self.assertIn(field, props)
-        # But none of them are in required — Python validates post-hoc.
         required = item_schema.get("required", [])
         for field in ("mechanism", "key_actors", "affected_parties", "evidence_excerpts", "confidence", "confidence_reason"):
-            self.assertNotIn(field, required)
+            self.assertIn(field, props)
+            self.assertIn(field, required)
 
 
 class TestTruncationEventsSurfaced(unittest.TestCase):
@@ -1012,15 +1012,25 @@ class TestEditorExcludesFailedFromEvidence(unittest.TestCase):
         received_payload = {}
 
         class FakeBrain:
+            last_error = ""
             def chat_json(self, system, user, schema=None, **kwargs):
                 received_payload.update(json.loads(user))
-                return {"headline": "H", "briefing_paragraphs": ["p"], "cross_signal_narrative": "n"}
+                return {
+                    "headline": "H",
+                    "summary": "S",
+                    "key_takeaways": ["k"],
+                    "briefing_paragraphs": [
+                        {"heading": "T", "body": "p", "bullets": ["b"], "signal_ids": [good.id]}
+                    ],
+                }
 
         brain = FakeBrain()
         generate_briefing_from_artifacts([good, bad], brain, "prompt", {})
 
-        # Only the good signal must appear in the signals array sent to Groq.
-        sent_ids = {s["id"] for s in received_payload.get("signals", [])}
+        # When at least one signal has an artifact, only those signals appear in
+        # the payload — the failed signal is filtered out. (The v2 block uses
+        # signal_id, not id, as the field name.)
+        sent_ids = {s["signal_id"] for s in received_payload.get("signals", [])}
         self.assertIn(good.id, sent_ids)
         self.assertNotIn(bad.id, sent_ids)
 
@@ -1259,12 +1269,17 @@ class TestEditorWorkerPreservesAnalystStatus(unittest.TestCase):
             def __init__(self, cfg):
                 pass
 
+            last_error = ""
+
             def chat_json(self, system, user, schema=None, **kwargs):
                 received_payload.update(json.loads(user))
                 return {
                     "headline": "H",
-                    "briefing_paragraphs": ["paragraph"],
-                    "cross_signal_narrative": "narrative",
+                    "summary": "S",
+                    "key_takeaways": ["k"],
+                    "briefing_paragraphs": [
+                        {"heading": "T", "body": "paragraph", "bullets": [], "signal_ids": [good.id]},
+                    ],
                 }
 
         config = _make_config_minimal()
@@ -1277,7 +1292,8 @@ class TestEditorWorkerPreservesAnalystStatus(unittest.TestCase):
         with patch("signal_stream.worker.BrainClient", FakeBrain):
             handle_task("editor", config, MagicMock(), {"editor": "You are the editor."}, {}, {}, task)
 
-        sent_ids = {s["id"] for s in received_payload.get("signals", [])}
+        # v2 block uses signal_id, not id.
+        sent_ids = {s["signal_id"] for s in received_payload.get("signals", [])}
         self.assertIn(
             good.id, sent_ids,
             "Success signal must appear in Groq evidence payload after worker-boundary rehydration",
