@@ -21,7 +21,10 @@ import sys
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from .analysis_tools import ANALYST_REVIEW_SCHEMA, _OVERSIZED_TRUNCATION, _chat_json_with_truncation_fallback, _review_payload
+from .analysis_tools import ANALYST_REVIEW_SCHEMA, _char_budget_from_tokens, _chat_json_with_truncation_fallback, _review_payload
+
+# Match the default token budget used by the analyst review loop.
+_EDITOR_MAX_ARTICLE_CHARS = _char_budget_from_tokens(18000)
 from .llm import BrainClient
 from .models import Signal
 from .source_tools import fetch_full_article_page
@@ -486,8 +489,8 @@ def _run_single_fallback(
             return
 
         chars_total = len(body)
-        was_truncated = chars_total > _OVERSIZED_TRUNCATION
-        chars_sent = min(chars_total, _OVERSIZED_TRUNCATION)
+        was_truncated = chars_total > _EDITOR_MAX_ARTICLE_CHARS
+        chars_sent = min(chars_total, _EDITOR_MAX_ARTICLE_CHARS)
 
         review_ctx: dict[str, Any] = {"article_text": body}
         if og_image:
@@ -495,7 +498,7 @@ def _run_single_fallback(
 
         payload = {
             "task": "review_ranked_signals",
-            "signals": [_review_payload(signal, review_ctx)],
+            "signals": [_review_payload(signal, review_ctx, _EDITOR_MAX_ARTICLE_CHARS)],
             # score_adjustment_limit=0 so the Editor fallback never changes scores —
             # only artifact quality improves, not rank order.
             "rules": {
