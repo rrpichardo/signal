@@ -169,10 +169,11 @@ class TestRSSBodyUsedWhenExtractionFails(unittest.TestCase):
 
 class TestOversizedArticleTruncatedWithWarning(unittest.TestCase):
     def test_oversized_article_truncated_with_warning(self) -> None:
-        """An article > 8000 chars triggers a truncation log and retry."""
-        from signal_stream.analysis_tools import _chat_json_with_truncation_fallback, _OVERSIZED_TRUNCATION
+        """An article > retry_max_chars triggers a smart-trim log and retry."""
+        from signal_stream.analysis_tools import _chat_json_with_truncation_fallback
 
-        huge_text = "X" * 20000
+        # Must exceed the default retry_max_chars (36 000 = 72 000 // 2) to trigger trim.
+        huge_text = "X" * 80000
         signals = [_make_signal(0, body=huge_text)]
         review_context = {signals[0].id: {"article_text": huge_text}}
 
@@ -217,16 +218,16 @@ class TestOversizedArticleTruncatedWithWarning(unittest.TestCase):
             )
 
         stderr_out = captured.getvalue()
-        self.assertIn("truncated", stderr_out.lower())
-        # On retry, article_text must be ≤ _OVERSIZED_TRUNCATION
+        self.assertIn("trimmed", stderr_out.lower())
+        # On retry, article_text must be ≤ the default retry_max_chars (72 000 // 2 = 36 000).
         retry_payload = json.loads(call_args[-1])
         for item in retry_payload.get("signals", []):
-            self.assertLessEqual(len(str(item.get("article_text", ""))), _OVERSIZED_TRUNCATION)
+            self.assertLessEqual(len(str(item.get("article_text", ""))), 36000)
         self.assertIsNotNone(result)
         # Truncation info should carry the post-truncation char count.
         self.assertTrue(trunc_info["was_truncated"])
-        self.assertEqual(trunc_info["chars_total"], 20000)
-        self.assertLessEqual(trunc_info["chars_sent"], _OVERSIZED_TRUNCATION)
+        self.assertEqual(trunc_info["chars_total"], 80000)
+        self.assertLessEqual(trunc_info["chars_sent"], 36000)
 
 
 # ---------------------------------------------------------------------------
@@ -595,7 +596,9 @@ class TestAnalystSchemaIncludesArtifactFields(unittest.TestCase):
 class TestTruncationEventsSurfaced(unittest.TestCase):
     def test_review_returns_truncation_events_when_fallback_fires(self) -> None:
         """_review_signals_in_chunks emits one truncation_event per truncated signal."""
-        huge_text = "Y" * 20000
+        # Must exceed the default max_article_chars (72 000) so _review_payload pre-trims,
+        # then exceed retry_max_chars (36 000) so the fallback retry also trims.
+        huge_text = "Y" * 80000
         signal = _make_signal(0, body=huge_text)
         review_context = {signal.id: {"article_text": huge_text}}
         behavior = {"analyst_review_limit": 5, "analyst_review_batch_size": 1}
@@ -623,8 +626,10 @@ class TestTruncationEventsSurfaced(unittest.TestCase):
 
         self.assertEqual(len(truncation_events), 1)
         self.assertEqual(truncation_events[0]["signal_id"], signal.id)
-        self.assertEqual(truncation_events[0]["chars_total"], 20000)
-        self.assertLessEqual(truncation_events[0]["chars_sent"], 8000)
+        # chars_total reflects text after _review_payload pre-trim (≤ 72 000).
+        self.assertLessEqual(truncation_events[0]["chars_total"], 72000)
+        # chars_sent reflects the retry trim (≤ retry_max_chars = 36 000).
+        self.assertLessEqual(truncation_events[0]["chars_sent"], 36000)
 
 
 # ---------------------------------------------------------------------------

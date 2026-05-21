@@ -829,7 +829,26 @@ def _is_valid_og_image(url: str) -> bool:
 
 
 _FULL_PAGE_MIN_CHARS = 200    # body shorter than this → keep RSS body
-_OVERSIZED_TRUNCATION = 8000  # chars — truncate then retry once on context-too-large
+_CHARS_PER_TOKEN = 4          # rough English heuristic; no stdlib tokenizer available
+_TRIM_MARKER = "\n\n[... middle section trimmed for length ...]\n\n"
+
+
+def _char_budget_from_tokens(max_tokens: int) -> int:
+    # Convert a token budget to an approximate character budget.
+    return max(1000, int(max_tokens) * _CHARS_PER_TOKEN)
+
+
+def _smart_trim_article(text: str, max_chars: int) -> tuple[str, bool]:
+    # Keep lead (~2/3) and conclusion (~1/3), drop the middle.
+    # Bodies under budget pass through untouched.
+    if len(text) <= max_chars:
+        return text, False
+    budget = max_chars - len(_TRIM_MARKER)
+    if budget <= 0:
+        return text[:max_chars], True
+    head_len = (budget * 2) // 3
+    tail_len = budget - head_len
+    return text[:head_len] + _TRIM_MARKER + text[-tail_len:], True
 
 
 def _fetch_full_pages_for_top_n(
@@ -872,12 +891,14 @@ def _chat_json_with_truncation_fallback(
     user: str,
     schema: dict[str, Any],
     required_fields: list[str] | None,
+    retry_max_chars: int = 36000,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-    """Call chat_json; on a context-too-large error, truncate article_text to 8000 chars and retry.
+    """Call chat_json; on a context-too-large error, smart-trim article_text and retry.
 
     Groq signals a too-large context via HTTP 400 with 'context_length_exceeded'
     (or similar) in the error body. We detect any None return whose last_error
-    contains a size hint and retry once with the article body truncated.
+    contains a size hint and retry once with the article body smart-trimmed to
+    retry_max_chars (keeps lead + conclusion, drops the middle).
 
     Phase 2: returns (result, truncation_info). truncation_info has shape
     {"was_truncated": bool, "chars_total": int, "chars_sent": int}. callers persist
@@ -901,16 +922,17 @@ def _chat_json_with_truncation_fallback(
     # "Hit Groq rate limit three times") and would trigger an unnecessary retry.
     if not any(kw in last_err for kw in ("context", "too large", "length")):
         return None, truncation_info
-    # Parse payload, truncate article_text, retry once.
+    # Parse payload, smart-trim article_text (keep lead + conclusion), retry once.
     try:
         payload = json.loads(user)
         for signal_item in payload.get("signals", []):
             text = str(signal_item.get("article_text", ""))
-            if len(text) > _OVERSIZED_TRUNCATION:
-                signal_item["article_text"] = text[:_OVERSIZED_TRUNCATION]
+            trimmed, was_trimmed = _smart_trim_article(text, retry_max_chars)
+            if was_trimmed:
+                signal_item["article_text"] = trimmed
                 truncation_info["was_truncated"] = True
                 print(
-                    f"[signal_stream] Article too large for Groq; truncated to {_OVERSIZED_TRUNCATION} chars and retrying.",
+                    f"[signal_stream] Article too large for Groq; smart-trimmed to {retry_max_chars} chars and retrying.",
                     file=sys.stderr,
                 )
         raw = llm.chat_json(system, json.dumps(payload, sort_keys=True), schema, required_fields=None)
@@ -972,6 +994,7 @@ def _review_signals_in_chunks(
     from datetime import datetime, timezone
     limit = int(behavior.get("analyst_review_limit", 40))
     batch_size = max(1, int(behavior.get("analyst_review_batch_size", 1)))
+    max_article_chars = _char_budget_from_tokens(behavior.get("max_article_tokens_for_llm", 18000))
     candidates = signals[:limit]
     reviewed: dict[str, dict[str, Any]] = {}
     truncation_events: list[dict[str, Any]] = []
@@ -982,7 +1005,7 @@ def _review_signals_in_chunks(
         chunk = candidates[index : index + batch_size]
         payload = {
             "task": "review_ranked_signals",
-            "signals": [_review_payload(signal, review_context.get(signal.id, {})) for signal in chunk],
+            "signals": [_review_payload(signal, review_context.get(signal.id, {}), max_article_chars) for signal in chunk],
             "rules": {
                 "score_adjustment_limit": int(behavior.get("model_score_adjustment_limit", 20)),
                 "summary_mode": behavior.get("summary_mode", "short_expanded"),
@@ -1001,6 +1024,7 @@ def _review_signals_in_chunks(
             user_msg,
             ANALYST_REVIEW_SCHEMA,
             required_fields=None,
+            retry_max_chars=max_article_chars // 2,
         )
         if raw is None:
             # Classify error type by inspecting llm.last_error.
@@ -1086,10 +1110,9 @@ def _review_signals_in_chunks(
     return reviewed, truncation_events, statuses
 
 
-def _review_payload(signal: Signal, context: dict[str, Any]) -> dict[str, Any]:
-    # Send article_text in full — no [:1800] truncation. The oversized-article
-    # policy in _apply_analyst_mode handles the rare case where a single article
-    # exceeds Groq's context limit.
+def _review_payload(signal: Signal, context: dict[str, Any], max_chars: int = 72000) -> dict[str, Any]:
+    # Smart-trim article_text to max_chars before sending to Groq.
+    # Keeps lead + conclusion so the model sees substance, not just the opening.
     return {
         "id": signal.id,
         "title": signal.title,
@@ -1100,7 +1123,7 @@ def _review_payload(signal: Signal, context: dict[str, Any]) -> dict[str, Any]:
         "matched_priorities": signal.matched_priorities,
         "entities": signal.entities,
         "duplicate_count": signal.duplicate_count,
-        "article_text": str(context.get("article_text", "")),
+        "article_text": _smart_trim_article(str(context.get("article_text", "")), max_chars)[0],
         "source_facts": {
             "title": signal.title,
             "source": signal.source,

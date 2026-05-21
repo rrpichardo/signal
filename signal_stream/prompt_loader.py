@@ -121,6 +121,9 @@ DEFAULT_BEHAVIOR_SETTINGS: dict[str, Any] = {
     "enable_critic": True,
     "max_critic_rounds": 1,
     "critic_score_threshold": 70,
+    # Max article body sent to Groq per review request, in tokens (~4 chars each).
+    # 18000 tokens ≈ 72k chars. Upper bound 120000 stays under the ~128k model context.
+    "max_article_tokens_for_llm": 18000,
 }
 
 
@@ -223,6 +226,11 @@ def load_behavior_settings(path: str | Path | None) -> dict[str, Any]:
     if "critic_score_threshold" in behavior:
         try:
             settings["critic_score_threshold"] = max(0, min(100, int(behavior["critic_score_threshold"])))
+        except (TypeError, ValueError):
+            pass
+    if "max_article_tokens_for_llm" in behavior:
+        try:
+            settings["max_article_tokens_for_llm"] = max(1000, min(120000, int(behavior["max_article_tokens_for_llm"])))
         except (TypeError, ValueError):
             pass
     return settings
