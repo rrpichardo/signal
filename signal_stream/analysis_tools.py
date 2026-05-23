@@ -1064,7 +1064,15 @@ def _review_signals_in_chunks(
                 file=sys.stderr,
             )
             continue
-        for item in raw.get("signals", []):
+        # Normalize the model response: when batch_size=1 the model sometimes
+        # returns the signal object at the top level (e.g. {"id": ..., "short_summary": ...})
+        # instead of wrapped in {"signals": [{...}]}. Detect this and wrap it so the
+        # loop below works correctly in both cases.
+        signal_items = raw.get("signals")
+        if not isinstance(signal_items, list):
+            # Top-level response: treat the whole dict as a single signal if it has an id.
+            signal_items = [raw] if raw.get("id") else []
+        for item in signal_items:
             if not item.get("id"):
                 continue
             # Validate + coerce the analyst item into a stable shape. Missing
