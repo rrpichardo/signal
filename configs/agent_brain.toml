@@ -221,6 +221,12 @@ entity_extraction = "hybrid"
 enable_critic = true
 max_critic_rounds = 1
 critic_score_threshold = 70
+# Max article body sent to Groq per review, measured in tokens (~4 chars each).
+# batch_size=1 means each request gets the full context window to itself.
+# 18000 tokens ≈ 72k chars. Oversized articles keep lead + conclusion (middle
+# trimmed), never a blind first-N-chars cut. Model context is ~128k tokens, so
+# this leaves ample room for the prompt, metadata, and response.
+max_article_tokens_for_llm = 18000
 # Editor full-text fallback cap: max signals re-fetched per run when artifacts are thin.
 # Eligible signals are ranked by trigger severity (missing > truncated > critic-flagged > low-confidence > vague).
 editor_fulltext_fallback_cap = 3

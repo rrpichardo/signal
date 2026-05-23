@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { pushToast } from "@/hooks/use-toast";
+import { CircleHelp, Lock, Unlock } from "lucide-react";
 
 // Renders a colored status badge based on the source's last health check.
 function HealthBadge({ health }: { health: Source["health"] }) {
@@ -31,8 +32,49 @@ function HealthBadge({ health }: { health: Source["health"] }) {
   return (
     <Badge variant="outline" className={styles[label] ?? ""}>
       {label}
-      {/* Lock icon surfaces paywall detection inline without a tooltip. */}
-      {health.paywall_detected && " 🔒"}
+    </Badge>
+  );
+}
+
+// Shows the paid/free result directly instead of hiding it inside health.
+function PaidBadge({ health }: { health: Source["health"] }) {
+  if (!health) {
+    return (
+      <Badge variant="outline" className="gap-1 text-muted-foreground">
+        <CircleHelp className="h-3 w-3" aria-hidden="true" />
+        Unknown
+      </Badge>
+    );
+  }
+
+  if (health.paywall_detected || health.status === "paywall") {
+    return (
+      <Badge
+        variant="outline"
+        className="gap-1 border-yellow-300 bg-yellow-500/10 text-yellow-700"
+      >
+        <Lock className="h-3 w-3" aria-hidden="true" />
+        Paid
+      </Badge>
+    );
+  }
+
+  if (health.status === "ok" || health.status === "empty") {
+    return (
+      <Badge
+        variant="outline"
+        className="gap-1 border-green-300 bg-green-500/10 text-green-700"
+      >
+        <Unlock className="h-3 w-3" aria-hidden="true" />
+        Free
+      </Badge>
+    );
+  }
+
+  return (
+    <Badge variant="outline" className="gap-1 text-muted-foreground">
+      <CircleHelp className="h-3 w-3" aria-hidden="true" />
+      Unknown
     </Badge>
   );
 }
@@ -135,7 +177,7 @@ export default function SourcesPage() {
   const enabledCount = sources.filter((s) => s.enabled).length;
 
   return (
-    <div className="mx-auto max-w-5xl px-4 py-8 space-y-6">
+    <div className="space-y-6">
       {/* Header row: title + summary counts + bulk test button */}
       <div className="flex items-center justify-between">
         <div>
@@ -155,11 +197,12 @@ export default function SourcesPage() {
       </div>
 
       {/* Sources table — one row per source. */}
-      <div className="rounded-md border">
-        <table className="w-full text-sm">
+      <div className="overflow-x-auto rounded-md border">
+        <table className="min-w-[960px] w-full text-sm">
           <thead>
             <tr className="border-b bg-muted/40">
               <th className="px-4 py-2 text-left font-medium text-muted-foreground">Name</th>
+              <th className="px-4 py-2 text-left font-medium text-muted-foreground">Paid?</th>
               <th className="px-4 py-2 text-left font-medium text-muted-foreground">Kind</th>
               <th className="px-4 py-2 text-left font-medium text-muted-foreground">Group</th>
               <th className="px-4 py-2 text-left font-medium text-muted-foreground">Health</th>
@@ -182,6 +225,9 @@ export default function SourcesPage() {
                       {source.url}
                     </div>
                   )}
+                </td>
+                <td className="px-4 py-3">
+                  <PaidBadge health={source.health} />
                 </td>
                 <td className="px-4 py-3 text-muted-foreground">{source.kind}</td>
                 <td className="px-4 py-3 text-muted-foreground">{source.group}</td>

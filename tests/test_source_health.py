@@ -35,6 +35,48 @@ class TestCheckSourceHealth(unittest.TestCase):
         self.assertFalse(result.paywall_detected)
         self.assertEqual(result.source_id, "src_abc123")
 
+    def test_paid_marker_in_feed_sets_paid_without_failing_health(self):
+        # Readable feeds can still contain paid posts; keep health ok but surface paid.
+        fake = {
+            "status": "ok",
+            "articles": [{
+                "id": "1",
+                "title": "Paid essay",
+                "url": "https://example.com/paid",
+                "body": "May 14, 2026 ∙ Paid 6 Share The preview starts here.",
+            }],
+            "error": "",
+            "confidence": 0.9,
+        }
+        with patch("signal_stream.source_tools.fetch_source", return_value=fake):
+            from signal_stream.source_health import check_source_health
+            result = check_source_health(_fake_record())
+        self.assertEqual(result.status, "ok")
+        self.assertTrue(result.paywall_detected)
+
+    def test_paid_marker_on_article_page_sets_paid(self):
+        # Some RSS snippets look free; check a small page sample for paid labels.
+        fake = {
+            "status": "ok",
+            "articles": [{
+                "id": "1",
+                "title": "Hidden paid essay",
+                "url": "https://example.com/paid",
+                "body": "Public feed excerpt with no paid wording.",
+            }],
+            "error": "",
+            "confidence": 0.9,
+        }
+        with patch("signal_stream.source_tools.fetch_source", return_value=fake), \
+             patch(
+                 "signal_stream.source_tools.fetch_full_article_page",
+                 return_value=("Newsletter headline May 14, 2026 ∙ Paid 6 Share Body", None),
+             ):
+            from signal_stream.source_health import check_source_health
+            result = check_source_health(_fake_record())
+        self.assertEqual(result.status, "ok")
+        self.assertTrue(result.paywall_detected)
+
     def test_http_402_sets_paywall(self):
         # HTTP 402 in error message should trigger paywall detection.
         fake = {"status": "error", "articles": [], "error": "HTTP 402 Payment Required", "confidence": 0.0}

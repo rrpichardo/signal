@@ -467,8 +467,8 @@ class TestRunFulltextFallback(unittest.TestCase):
 
     @patch("signal_stream.editor_tools.fetch_full_article_page")
     def test_truncation_metadata_captured_correctly(self, mock_fetch: MagicMock) -> None:
-        # Body longer than _OVERSIZED_TRUNCATION → was_truncated=True
-        long_body = "x" * 9000
+        # Body longer than _EDITOR_MAX_ARTICLE_CHARS (72 000) → was_truncated=True.
+        long_body = "x" * 80000
         mock_fetch.return_value = (long_body, None)
         signal = self._make_and_persist("s1")
         artifacts: dict = {}
@@ -488,8 +488,8 @@ class TestRunFulltextFallback(unittest.TestCase):
         assert artifact is not None
         meta = artifact["_meta"]
         self.assertTrue(meta["was_truncated"])
-        self.assertEqual(meta["chars_total"], 9000)
-        self.assertEqual(meta["chars_sent"], 8000)
+        self.assertEqual(meta["chars_total"], 80000)
+        self.assertEqual(meta["chars_sent"], 72000)
 
     @patch("signal_stream.editor_tools.fetch_full_article_page")
     def test_critic_flags_cleared_after_refresh(self, mock_fetch: MagicMock) -> None:
