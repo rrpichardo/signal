@@ -112,6 +112,9 @@ DEFAULT_BEHAVIOR_SETTINGS: dict[str, Any] = {
     "analyst_review_limit": 40,
     "analyst_review_batch_size": 1,
     "analyst_full_review": True,
+    # How many times to retry a signal whose first Groq review fails with a
+    # rate-limit/timeout. 0 = no retry. Capped at 1 to keep runtime bounded.
+    "analyst_retry_max_attempts": 1,
     "executive_summary_limit": 12,
     # Minimum score a signal must clear (0-100) for the latest run to refresh
     # the Briefing. If no signal in the latest run clears this floor, the
@@ -189,6 +192,12 @@ def load_behavior_settings(path: str | Path | None) -> dict[str, Any]:
         settings["scout_note_enabled"] = bool(behavior.get("scout_note_enabled"))
     if "analyst_full_review" in behavior:
         settings["analyst_full_review"] = bool(behavior.get("analyst_full_review"))
+    if "analyst_retry_max_attempts" in behavior:
+        # 0 = no retry, 1 = one retry. Capped at 1 so a run can't spin on retries.
+        try:
+            settings["analyst_retry_max_attempts"] = max(0, min(1, int(behavior["analyst_retry_max_attempts"])))
+        except (TypeError, ValueError):
+            pass
     if "model_score_adjustment_limit" in behavior:
         try:
             settings["model_score_adjustment_limit"] = max(0, min(100, int(behavior["model_score_adjustment_limit"])))
@@ -420,7 +429,9 @@ def _render_brain_toml(
             f"analyst_review_limit = {int(behavior.get('analyst_review_limit', 40))}",
             f"analyst_review_batch_size = {int(behavior.get('analyst_review_batch_size', 1))}",
             f"analyst_full_review = {_toml_bool(behavior.get('analyst_full_review', True))}",
+            f"analyst_retry_max_attempts = {int(behavior.get('analyst_retry_max_attempts', 1))}",
             f"executive_summary_limit = {int(behavior.get('executive_summary_limit', 12))}",
+            f"executive_summary_min_score = {int(behavior.get('executive_summary_min_score', 45))}",
             f'summary_mode = "{_toml_text(behavior.get("summary_mode", "short_expanded"))}"',
             f'visuals_mode = "{_toml_text(behavior.get("visuals_mode", "image_icon"))}"',
             f'entity_extraction = "{_toml_text(behavior.get("entity_extraction", "hybrid"))}"',
@@ -429,13 +440,18 @@ def _render_brain_toml(
             f"enable_critic = {_toml_bool(behavior.get('enable_critic', False))}",
             f"max_critic_rounds = {int(behavior.get('max_critic_rounds', 1))}",
             f"critic_score_threshold = {int(behavior.get('critic_score_threshold', 70))}",
+            # Max article body sent to Groq per review (tokens, ~4 chars each).
+            f"max_article_tokens_for_llm = {int(behavior.get('max_article_tokens_for_llm', 18000))}",
             "",
         ]
     )
 
-    # Richard Signal Score V2 sections. The older helper bands remain in
-    # DEFAULT_SCORING_RUBRIC for compatibility, but the editable brain file only
-    # exposes the V2 value/trust weights and Python-owned hard caps.
+    # Richard Signal Score V2 sections. The editable brain file exposes the V2
+    # value/trust weights, Python-owned hard caps, and the three bands that
+    # _base_score_card actually consumes (priority/company/event strength).
+    # recency_bands and corroboration_bands are intentionally NOT rendered here:
+    # they feed the legacy _score_recency / _score_corroboration helpers, which
+    # _base_score_card no longer calls, so exposing them would imply a false effect.
     _scoring_sections = [
         ("scoring.value_weights", "value_weights",
          "# V2 value multipliers. Six 1-5 dimensions; weights must sum to 20."),
@@ -445,6 +461,12 @@ def _render_brain_toml(
          "# Penalty scale applied to the weighted trust deficit. 0.25 means max penalty is 25 points."),
         ("scoring.hard_caps", "hard_caps",
          "# Python-owned hard caps for low-value patterns."),
+        ("scoring.priority_match_bands", "priority_match_bands",
+         "# Points for how directly an article matches your priority groups (0-25)."),
+        ("scoring.company_match_bands", "company_match_bands",
+         "# Points for how centrally a watchlist company features (0-25)."),
+        ("scoring.event_strength_bands", "event_strength_bands",
+         "# Points for how strong the underlying event is (0-25)."),
     ]
     for toml_section, rubric_key, comment in _scoring_sections:
         lines.extend(["", f"[{toml_section}]", comment])

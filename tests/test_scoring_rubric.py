@@ -369,5 +369,79 @@ class TestScoringWeightsNormalized(unittest.TestCase):
             self.assertGreater(len(DEFAULT_SCORING_RUBRIC[section]), 0, f"Empty section: {section}")
 
 
+# ---------------------------------------------------------------------------
+# Test: legacy bands have no V2 effect; live bands do (guards the manifest split)
+# ---------------------------------------------------------------------------
+
+class TestBandEffectClassification(unittest.TestCase):
+    def _story(self) -> tuple[Article, SignalDraft]:
+        article = _make_article(
+            "Anthropic launches Claude 5 frontier model",
+            body=(
+                "Anthropic launched Claude 5, a frontier reasoning model with new API "
+                "pricing and MCP tool use for enterprise customers."
+            ),
+            published_at=utc_now_iso(),
+        )
+        article.source = "Reuters"
+        article.url = "https://www.reuters.com/technology/anthropic-claude-5"
+        draft = _make_draft(
+            article,
+            event_type="platform_shift",
+            competitors=["Anthropic"],
+            matched_priorities=[
+                {"name": "Frontier AI", "hits": ["Anthropic", "Claude", "model"], "raw_count": 6, "weight": 2.8}
+            ],
+        )
+        return article, draft
+
+    def test_legacy_bands_do_not_change_v2_score(self) -> None:
+        """recency_bands / corroboration_bands feed only uncalled V1 helpers."""
+        from copy import deepcopy
+
+        article, draft = self._story()
+        base_score, _ = _base_score_card(article, draft, DEFAULT_SCORING_RUBRIC)
+
+        zeroed = deepcopy(DEFAULT_SCORING_RUBRIC)
+        for section in ("recency_bands", "corroboration_bands"):
+            for key in zeroed[section]:
+                zeroed[section][key] = 0
+        legacy_score, _ = _base_score_card(article, draft, zeroed)
+
+        self.assertEqual(
+            base_score, legacy_score,
+            "recency/corroboration bands must not affect the V2 score (they are legacy)",
+        )
+
+    def test_live_bands_do_change_v2_score(self) -> None:
+        """priority/company/event bands are consumed by _base_score_card."""
+        from copy import deepcopy
+
+        article, draft = self._story()
+        base_score, _ = _base_score_card(article, draft, DEFAULT_SCORING_RUBRIC)
+
+        lowered = deepcopy(DEFAULT_SCORING_RUBRIC)
+        for section in ("priority_match_bands", "company_match_bands", "event_strength_bands"):
+            for key in lowered[section]:
+                lowered[section][key] = 0
+        lowered_score, _ = _base_score_card(article, draft, lowered)
+
+        self.assertLess(
+            lowered_score, base_score,
+            "Zeroing the live bands must reduce the V2 score",
+        )
+
+    def test_committed_brain_file_exposes_only_live_bands(self) -> None:
+        """The editable agent_brain.toml lists the 3 live bands, not the legacy two."""
+        from pathlib import Path
+
+        text = (Path(__file__).resolve().parents[1] / "configs" / "agent_brain.toml").read_text()
+        self.assertIn("[scoring.priority_match_bands]", text)
+        self.assertIn("[scoring.company_match_bands]", text)
+        self.assertIn("[scoring.event_strength_bands]", text)
+        self.assertNotIn("[scoring.recency_bands]", text)
+        self.assertNotIn("[scoring.corroboration_bands]", text)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -8,7 +8,9 @@ import type {
   BrainSettings,
   DisplaySettings,
   ExecutiveBriefingResponse,
+  ManifestEntry,
   MemoryItem,
+  RuntimeSettings,
   Signal,
   SignalsResponse,
   Source,
@@ -58,6 +60,15 @@ export const api = {
   signalById: (id: string) => http<Signal>(`/api/signals/${encodeURIComponent(id)}`),
   memory: () => http<MemoryItem[]>("/api/memory"),
   settings: () => http<BrainSettings>("/api/settings"),
+  // The config-knob manifest that drives the Settings forms + labels + badges.
+  settingsManifest: () => http<{ manifest: ManifestEntry[] }>("/api/settings/manifest"),
+  // Restart-required runtime knobs in ai_tech.toml ([brain]/[agent]/[delivery]).
+  runtimeSettings: () => http<RuntimeSettings>("/api/runtime-settings"),
+  saveRuntimeSettings: (payload: Partial<RuntimeSettings>) =>
+    http<{ status: string; runtime: RuntimeSettings }>("/api/runtime-settings", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   brain: () => http<{ raw: string }>("/api/brain"),
   // Display preferences (page_size, default_scope) — read by DigestPage on mount.
   displaySettings: () => http<DisplaySettings>("/api/display-settings"),

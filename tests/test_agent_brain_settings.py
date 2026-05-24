@@ -42,6 +42,46 @@ class AgentBrainSettingsTest(unittest.TestCase):
             self.assertEqual(brain["scoring"]["trust_weights"]["claim_support_deficit"], 0.55)
             self.assertEqual(brain["scoring"]["trust_penalty"]["scale"], 0.30)
 
+    def test_newly_exposed_behavior_keys_round_trip(self) -> None:
+        """Keys that _render_brain_toml previously dropped now survive a save."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent_brain.toml"
+            save_brain_file(
+                path,
+                {
+                    "behavior": {
+                        "analyst_retry_max_attempts": 0,
+                        "executive_summary_min_score": 60,
+                        "max_article_tokens_for_llm": 16000,
+                    }
+                },
+            )
+            reloaded = load_behavior_settings(path)
+            self.assertEqual(reloaded["analyst_retry_max_attempts"], 0)
+            self.assertEqual(reloaded["executive_summary_min_score"], 60)
+            self.assertEqual(reloaded["max_article_tokens_for_llm"], 16000)
+
+    def test_live_scoring_bands_round_trip(self) -> None:
+        """The three V2-consumed band sections persist through a save."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent_brain.toml"
+            save_brain_file(
+                path,
+                {
+                    "scoring": {
+                        "priority_match_bands": {"direct_high_impact": 23},
+                        "company_match_bands": {"watchlist_strategic_action": 22},
+                        "event_strength_bands": {"major_platform_shift": 24},
+                    }
+                },
+            )
+            from signal_stream.prompt_loader import load_scoring_rubric
+
+            rubric = load_scoring_rubric(path)
+            self.assertEqual(rubric["priority_match_bands"]["direct_high_impact"], 23)
+            self.assertEqual(rubric["company_match_bands"]["watchlist_strategic_action"], 22)
+            self.assertEqual(rubric["event_strength_bands"]["major_platform_shift"], 24)
+
     def test_scout_soft_keep_keeps_model_labeled_drop_items(self) -> None:
         class FakeLLM:
             def available(self) -> bool:

@@ -21,6 +21,8 @@ from .prompt_loader import (
     save_brain_file,
     save_raw_brain_file,
 )
+from .runtime_config import load_runtime_settings, save_runtime_settings
+from .settings_manifest import SETTINGS_MANIFEST
 from .storage import SignalStorage
 
 # ---------------------------------------------------------------------------
@@ -365,6 +367,17 @@ def _handler(storage: SignalStorage, config: SignalConfig, config_path: str = "c
             if path == "/api/settings":
                 self._json(dashboard_settings(config))
                 return
+            if path == "/api/settings/manifest":
+                # The source-of-truth list of every config knob: label, help,
+                # control, effect-timing, and exposure. The React Settings page
+                # renders its scalar fields from this.
+                self._json({"manifest": SETTINGS_MANIFEST})
+                return
+            if path == "/api/runtime-settings":
+                # Restart-required knobs that live in ai_tech.toml (model,
+                # timeouts, ports, delivery limits).
+                self._json(load_runtime_settings(config_path))
+                return
             if path == "/api/brain":
                 self._json({"raw": load_brain_file(config.agent.brain_file)["raw"]})
                 return
@@ -393,6 +406,13 @@ def _handler(storage: SignalStorage, config: SignalConfig, config_path: str = "c
                 if path == "/api/brain":
                     save_raw_brain_file(config.agent.brain_file, str(payload.get("raw", "")))
                     self._json({"status": "ok", "brain": load_brain_file(config.agent.brain_file)})
+                    return
+                if path == "/api/runtime-settings":
+                    # Surgically update ai_tech.toml [brain]/[agent]/[delivery]
+                    # scalars; preserves the sources/priorities arrays. Invalid or
+                    # non-editable keys raise and surface as a 400 below.
+                    saved = save_runtime_settings(config_path, dict(payload or {}))
+                    self._json({"status": "ok", "runtime": saved})
                     return
                 if path == "/api/display-settings":
                     # Persist display preferences. We piggyback on the brain-file save
@@ -713,8 +733,6 @@ LEGACY_DASHBOARD_HTML = """<!doctype html>
           <input id="analyst_review_limit" type="number" min="1" max="100">
           <label>Full Analyst review</label>
           <select id="analyst_full_review"><option value="false">off for faster local runs</option><option value="true">on for stronger models</option></select>
-          <label>Repeat penalty strength</label>
-          <select id="repeat_penalty_strength"><option>light</option><option>medium</option><option>strong</option></select>
 
           <h3 style="margin-top:18px">Critic (Reflection Loop)</h3>
           <label>Enable Critic <small>(reviews each digest before publishing; opt-in)</small></label>
@@ -871,7 +889,7 @@ LEGACY_DASHBOARD_HTML = """<!doctype html>
     async function loadSettings() {
       const brain = await get('/api/settings');
       const b = brain.behavior || {}, p = brain.prompts || {}, s = brain.scoring || {};
-      for (const key of ['scout_mode','analyst_mode','relevance_policy','repeat_penalty_strength','summary_mode','visuals_mode','entity_extraction']) {
+      for (const key of ['scout_mode','analyst_mode','relevance_policy','summary_mode','visuals_mode','entity_extraction']) {
         if (document.getElementById(key)) document.getElementById(key).value = b[key] || document.getElementById(key).value;
       }
       document.getElementById('scout_note_enabled').value = String(b.scout_note_enabled !== false);
@@ -910,7 +928,6 @@ LEGACY_DASHBOARD_HTML = """<!doctype html>
           analyst_full_review: document.getElementById('analyst_full_review').value === 'true',
           summary_mode: document.getElementById('summary_mode').value,
           visuals_mode: document.getElementById('visuals_mode').value,
-          repeat_penalty_strength: document.getElementById('repeat_penalty_strength').value,
           entity_extraction: document.getElementById('entity_extraction').value,
           // Critic-loop knobs — persisted alongside the rest of behavior.
           enable_critic: document.getElementById('enable_critic').value === 'true',
