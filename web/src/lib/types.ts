@@ -155,6 +155,45 @@ export interface BrainSettings {
   [key: string]: unknown;
 }
 
+// One entry from /api/settings/manifest — the source of truth describing a
+// config knob. Mirrors signal_stream/settings_manifest.py.
+export interface ManifestEntry {
+  id: string; // dotted path, e.g. "behavior.scout_mode"
+  file: "brain" | "runtime";
+  group: "reader" | "agent" | "scoring" | "display" | "runtime" | "prompts" | "sources" | "advanced";
+  label: string;
+  help: string;
+  control:
+    | "select"
+    | "slider"
+    | "switch"
+    | "number"
+    | "text"
+    | "textarea"
+    | "weights"
+    | "caps"
+    | "bands"
+    | "scale"
+    | "list"
+    | "external";
+  timing: "next_run" | "next_page" | "restart";
+  exposure: "editable" | "advanced";
+  reason?: string;
+  options?: string[];
+  min?: number;
+  max?: number;
+  step?: number;
+  validation?: "sum_to_20" | "sum_to_1";
+}
+
+// Restart-required runtime knobs from /api/runtime-settings (ai_tech.toml),
+// grouped by TOML section.
+export interface RuntimeSettings {
+  brain: Record<string, unknown>;
+  agent: Record<string, unknown>;
+  delivery: Record<string, unknown>;
+}
+
 // Executive briefing written by the Editor worker (Phase 3+).
 // Schema v2: structured paragraphs with subheads + bullets, plus key_takeaways
 // / insights / summary as first-class fields. Backend normalizes legacy

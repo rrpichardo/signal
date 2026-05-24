@@ -93,6 +93,24 @@ export function useBrain() {
   return useQuery({ queryKey: ["settings"], queryFn: api.settings });
 }
 
+// The settings manifest rarely changes; cache it for the session.
+export function useManifest() {
+  return useQuery({ queryKey: ["settings-manifest"], queryFn: api.settingsManifest, staleTime: Infinity });
+}
+
+// Restart-required runtime knobs (ai_tech.toml). No polling — only changes on save.
+export function useRuntimeSettings() {
+  return useQuery({ queryKey: ["runtime-settings"], queryFn: api.runtimeSettings });
+}
+
+export function useSaveRuntimeSettings() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.saveRuntimeSettings,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["runtime-settings"] }),
+  });
+}
+
 // Save mutations invalidate the matching read so the form re-syncs with the
 // freshly persisted settings the moment the request resolves.
 export function useSaveSettings() {

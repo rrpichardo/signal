@@ -213,7 +213,6 @@ executive_summary_limit = 12
 executive_summary_min_score = 45
 summary_mode = "short_expanded"
 visuals_mode = "image_icon"
-repeat_penalty_strength = "strong"
 entity_extraction = "hybrid"
 # Critic loop — set enable_critic = true to activate the reflection step.
 # max_critic_rounds: how many revision loops before the Orchestrator ships anyway.
@@ -227,9 +226,6 @@ critic_score_threshold = 70
 # trimmed), never a blind first-N-chars cut. Model context is ~128k tokens, so
 # this leaves ample room for the prompt, metadata, and response.
 max_article_tokens_for_llm = 18000
-# Editor full-text fallback cap: max signals re-fetched per run when artifacts are thin.
-# Eligible signals are ranked by trigger severity (missing > truncated > critic-flagged > low-confidence > vague).
-editor_fulltext_fallback_cap = 3
 
 [scoring.value_weights]
 # V2 value multipliers. Six 1-5 dimensions; weights must sum to 20.
@@ -261,6 +257,34 @@ single_source_sensational_claim = 60
 unsupported_opinion_prediction = 50
 minor_product_launch = 55
 duplicate_or_stale_repeat = 40
+
+[scoring.priority_match_bands]
+# Points for how directly an article matches your priority groups (0-25).
+# These three band tables ARE consumed by the V2 score (_base_score_card).
+no_match = 0
+weak_incidental = 5
+one_relevant_not_central = 10
+one_central_or_two_weak = 15
+one_central_with_support = 20
+direct_high_impact = 25
+
+[scoring.company_match_bands]
+# Points for how centrally a watchlist company features (0-25).
+no_match = 0
+one_passing = 5
+relevant_not_central = 10
+watchlist_central = 15
+watchlist_in_title_or_lede = 20
+watchlist_strategic_action = 25
+
+[scoring.event_strength_bands]
+# Points for how strong the underlying event is (0-25).
+none = 0
+opinion_or_listicle = 5
+useful_analysis = 10
+product_update_or_signal = 15
+launch_funding_regulation = 20
+major_platform_shift = 25
 
 # Dashboard display preferences. Edit here, save, and the digest reflects the new settings.
 # page_size = number of signal cards shown per page in the dashboard (1-100).

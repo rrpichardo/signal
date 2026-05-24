@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { useBrain, useSaveSettings } from "@/lib/queries";
+import { useBrain, useManifest, useSaveSettings } from "@/lib/queries";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { ReaderSettingsForm } from "@/components/settings/ReaderSettingsForm";
-import { AgentSettingsForm } from "@/components/settings/AgentSettingsForm";
-import { ScoringSettingsForm } from "@/components/settings/ScoringSettingsForm";
+import { ScalarGroupForm } from "@/components/settings/ScalarGroupForm";
+import { ScoringTablesForm } from "@/components/settings/ScoringTablesForm";
+import { RuntimeSettingsForm } from "@/components/settings/RuntimeSettingsForm";
+import { AdvancedKnobsList } from "@/components/settings/AdvancedKnobsList";
 import { PromptsForm } from "@/components/settings/PromptsForm";
 import { AdvancedBrainEditor } from "@/components/settings/AdvancedBrainEditor";
 import { SaveBar } from "@/components/settings/SaveBar";
@@ -11,25 +12,26 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { pushToast } from "@/hooks/use-toast";
 import type { BrainSettings } from "@/lib/types";
 
-// Settings page — tabbed form over the brain TOML, with a sticky SaveBar for
-// any unsaved changes across the Reader, Agent, and Prompts tabs.
-// The Advanced tab has its own save flow with an AlertDialog confirmation.
+// Settings page — every live config knob, driven by the backend manifest.
+// Brain-file tabs (Reader/Agent/Scoring/Display/Prompts) share the sticky
+// SaveBar (changes apply next run / next page load). The Runtime tab edits
+// ai_tech.toml via its own save flow (restart required). Advanced has the raw
+// TOML editor plus the read-only list of advanced-only knobs.
 export default function SettingsPage() {
   const { data: brain, isLoading } = useBrain();
+  const { data: manifestResp, isLoading: manifestLoading } = useManifest();
   const { mutate: saveSettings, isPending } = useSaveSettings();
 
-  // Local draft accumulates patches from each sub-form without hitting the backend.
   const [draft, setDraft] = useState<Partial<BrainSettings> | null>(null);
   const dirty = draft !== null;
 
-  function handleChange(patch: Partial<BrainSettings>) {
+  function handleChange(patch: Record<string, unknown>) {
     setDraft((prev) => ({ ...prev, ...patch }));
   }
 
   function handleSave() {
     if (!draft || !brain) return;
-    const merged = { ...brain, ...draft };
-    saveSettings(merged, {
+    saveSettings({ ...brain, ...draft }, {
       onSuccess: () => {
         setDraft(null);
         pushToast({ title: "Settings saved", description: "Changes take effect on the next agent run." });
@@ -38,11 +40,7 @@ export default function SettingsPage() {
     });
   }
 
-  function handleDiscard() {
-    setDraft(null);
-  }
-
-  if (isLoading) {
+  if (isLoading || manifestLoading) {
     return (
       <div className="space-y-6">
         <Skeleton className="h-10 w-64" />
@@ -51,13 +49,11 @@ export default function SettingsPage() {
     );
   }
 
-  if (!brain) {
-    return (
-      <p className="py-20 text-center text-body text-muted-foreground">Could not load settings.</p>
-    );
+  if (!brain || !manifestResp) {
+    return <p className="py-20 text-center text-body text-muted-foreground">Could not load settings.</p>;
   }
 
-  // Merged view: what the form renders is the saved state + any un-saved patches.
+  const manifest = manifestResp.manifest;
   const effective: BrainSettings = { ...brain, ...(draft ?? {}) };
 
   return (
@@ -65,7 +61,7 @@ export default function SettingsPage() {
       <div className="mb-8">
         <h1 className="font-serif text-h1 font-semibold">Settings</h1>
         <p className="mt-2 text-ui text-muted-foreground">
-          Changes apply on the next agent run.
+          Every config knob. Each field shows when its change takes effect.
         </p>
       </div>
 
@@ -74,35 +70,49 @@ export default function SettingsPage() {
           <TabsTrigger value="reader">Reader</TabsTrigger>
           <TabsTrigger value="agent">Agent</TabsTrigger>
           <TabsTrigger value="scoring">Scoring</TabsTrigger>
+          <TabsTrigger value="display">Display</TabsTrigger>
+          <TabsTrigger value="runtime">Runtime</TabsTrigger>
           <TabsTrigger value="prompts">Prompts</TabsTrigger>
           <TabsTrigger value="advanced">Advanced</TabsTrigger>
         </TabsList>
 
         <TabsContent value="reader">
-          <ReaderSettingsForm settings={effective} onChange={handleChange} />
+          <ScalarGroupForm manifest={manifest} group="reader" source={effective} onChange={handleChange} />
         </TabsContent>
 
         <TabsContent value="agent">
-          <AgentSettingsForm settings={effective} onChange={handleChange} />
+          <ScalarGroupForm manifest={manifest} group="agent" source={effective} onChange={handleChange} />
         </TabsContent>
 
-        {/* Scoring tab: component weights + top-N knobs. Sum-of-weights must equal 100. */}
         <TabsContent value="scoring">
-          <ScoringSettingsForm settings={effective} onChange={handleChange} />
+          {/* Top-N scalars first, then the V2 weight/cap/band tables. No V1 controls. */}
+          <ScalarGroupForm manifest={manifest} group="scoring" source={effective} onChange={handleChange} />
+          <div className="mt-10">
+            <ScoringTablesForm manifest={manifest} source={effective} onChange={handleChange} />
+          </div>
+        </TabsContent>
+
+        <TabsContent value="display">
+          <ScalarGroupForm manifest={manifest} group="display" source={effective} onChange={handleChange} />
+        </TabsContent>
+
+        {/* Runtime tab owns its own save flow (ai_tech.toml, restart required). */}
+        <TabsContent value="runtime">
+          <RuntimeSettingsForm manifest={manifest} />
         </TabsContent>
 
         <TabsContent value="prompts">
           <PromptsForm settings={effective} onChange={handleChange} />
         </TabsContent>
 
-        {/* Advanced tab bypasses the shared SaveBar — it has its own AlertDialog guard. */}
         <TabsContent value="advanced">
           <AdvancedBrainEditor raw={brain.raw ?? ""} />
+          <AdvancedKnobsList manifest={manifest} />
         </TabsContent>
       </Tabs>
 
-      {/* Sticky save bar appears when Reader/Agent/Prompts tabs have unsaved changes. */}
-      <SaveBar dirty={dirty} saving={isPending} onSave={handleSave} onDiscard={handleDiscard} />
+      {/* Sticky save bar for the brain-file tabs (not Runtime, which saves itself). */}
+      <SaveBar dirty={dirty} saving={isPending} onSave={handleSave} onDiscard={() => setDraft(null)} />
     </div>
   );
 }
