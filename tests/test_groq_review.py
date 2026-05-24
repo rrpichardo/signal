@@ -1398,5 +1398,116 @@ class TestSignalBlockSuppressesBodyForFailed(unittest.TestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# Bug 7: batch-of-one flat response (no wrapper, no id echo) must be kept
+# ---------------------------------------------------------------------------
+
+class TestFlatResponseIdInjectedBatchOfOne(unittest.TestCase):
+    def test_flat_response_without_id_kept_when_batch_of_one(self) -> None:
+        """batch_size=1: a flat response (no 'signals' wrapper, no 'id' echo) must be
+        kept by injecting the known signal id — not silently discarded.
+
+        Regression guard: llama-4-scout returns the review as a flat object without
+        echoing the input id. The normalizer previously required raw.get('id'), so
+        every such review was dropped (reviewed empty, status absent → caller
+        defaulted analyst_status to 'failed' with attempt_count 0). This was a 100%
+        silent failure of the entire model-review layer.
+        """
+        signal = _make_signal(0, score=72)
+        review_context = _make_review_context([signal])
+        behavior = {"analyst_review_limit": 5, "analyst_review_batch_size": 1}
+
+        class FakeLLM:
+            last_error = None
+            last_response_text = ""
+
+            def chat_json(self, system, user, schema=None, **kwargs):
+                # Flat: no "signals" wrapper, no "id" — exactly what Scout-17B returns.
+                return {
+                    "score": 70,
+                    "short_summary": "A fresh model-written card summary.",
+                    "expanded_summary": "An expanded paragraph about the change.",
+                    "entities": {},
+                    "mechanism": "A clear mechanism description with detail.",
+                    "key_actors": [],
+                    "affected_parties": [],
+                    "evidence_excerpts": [],
+                    "confidence": "medium",
+                    "confidence_reason": "Corroborated coverage.",
+                }
+
+        llm = FakeLLM()
+        reviewed, _, statuses = _review_signals_in_chunks(
+            llm, "sys", [signal], behavior, review_context
+        )
+
+        self.assertIn(signal.id, reviewed, "flat batch-of-one review must be kept via id injection")
+        self.assertEqual(reviewed[signal.id]["short_summary"], "A fresh model-written card summary.")
+        self.assertEqual(statuses[signal.id]["status"], "success")
+
+    def test_wrapped_item_without_id_kept_when_batch_of_one(self) -> None:
+        """batch_size=1: a {"signals": [{...}]} item that omits 'id' must also be salvaged."""
+        signal = _make_signal(0, score=80)
+        review_context = _make_review_context([signal])
+        behavior = {"analyst_review_limit": 5, "analyst_review_batch_size": 1}
+
+        class FakeLLM:
+            last_error = None
+            last_response_text = ""
+
+            def chat_json(self, system, user, schema=None, **kwargs):
+                # Correct wrapper, but the single item dropped its id.
+                return {"signals": [{
+                    "score": 70,
+                    "short_summary": "Wrapped summary without an id field.",
+                    "expanded_summary": "Expanded paragraph here.",
+                    "entities": {},
+                }]}
+
+        llm = FakeLLM()
+        reviewed, _, statuses = _review_signals_in_chunks(
+            llm, "sys", [signal], behavior, review_context
+        )
+
+        self.assertIn(signal.id, reviewed, "wrapped batch-of-one item with no id must be salvaged")
+        self.assertEqual(statuses[signal.id]["status"], "success")
+
+
+# ---------------------------------------------------------------------------
+# Bug 8: empty / unmappable response is classified + raw captured (no silent drop)
+# ---------------------------------------------------------------------------
+
+class TestEmptyResponseClassifiedAndLogged(unittest.TestCase):
+    def test_empty_response_marked_and_raw_captured(self) -> None:
+        """A non-None but empty response ({}) must produce an explicit 'empty_response'
+        failure with the raw text captured — never an invisible drop with null error.
+        """
+        signal = _make_signal(0, score=60)
+        review_context = _make_review_context([signal])
+        behavior = {"analyst_review_limit": 5, "analyst_review_batch_size": 1}
+
+        class FakeLLM:
+            last_error = None
+            last_response_text = "{}"
+
+            def chat_json(self, system, user, schema=None, **kwargs):
+                # Parseable JSON object, but carries nothing the analyst can map.
+                return {}
+
+        llm = FakeLLM()
+        captured = StringIO()
+        with patch.object(sys, "stderr", captured):
+            reviewed, _, statuses = _review_signals_in_chunks(
+                llm, "sys", [signal], behavior, review_context
+            )
+
+        self.assertNotIn(signal.id, reviewed)
+        self.assertIn(signal.id, statuses, "empty/unmappable response must record a status, not vanish")
+        self.assertEqual(statuses[signal.id]["error_type"], "empty_response")
+        self.assertIn("{}", statuses[signal.id].get("error_message", ""), "raw response must be captured for debugging")
+        # attempt is recorded so the caller sets attempt_count=1 (not the silent 0).
+        self.assertIsNotNone(statuses[signal.id].get("last_attempt_at"))
+
+
 if __name__ == "__main__":
     unittest.main()

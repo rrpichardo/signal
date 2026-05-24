@@ -1064,14 +1064,23 @@ def _review_signals_in_chunks(
                 file=sys.stderr,
             )
             continue
-        # Normalize the model response: when batch_size=1 the model sometimes
-        # returns the signal object at the top level (e.g. {"id": ..., "short_summary": ...})
-        # instead of wrapped in {"signals": [{...}]}. Detect this and wrap it so the
-        # loop below works correctly in both cases.
+        # Normalize the model response. Smaller models (e.g. llama-4-scout) routinely
+        # return the review as a flat object — no {"signals": [...]} wrapper AND no
+        # "id" echo. With batch_size=1 the response can only belong to the single
+        # signal we sent, so we accept the un-wrapped shape and inject the known id
+        # below. Without this, every such review was silently discarded (the cause of
+        # a 100% silent failure of the model-review layer).
         signal_items = raw.get("signals")
         if not isinstance(signal_items, list):
-            # Top-level response: treat the whole dict as a single signal if it has an id.
-            signal_items = [raw] if raw.get("id") else []
+            if raw.get("id") or len(chunk) == 1:
+                signal_items = [raw] if (isinstance(raw, dict) and raw) else []
+            else:
+                # Multi-signal batch with no wrapper and no id — unattributable.
+                signal_items = []
+        # Inject the id for an unambiguous batch-of-one when the model dropped the
+        # echo, so a valid review isn't dropped by the id guard in the loop below.
+        if len(chunk) == 1 and len(signal_items) == 1 and not signal_items[0].get("id"):
+            signal_items[0]["id"] = chunk[0].id
         for item in signal_items:
             if not item.get("id"):
                 continue
@@ -1115,6 +1124,27 @@ def _review_signals_in_chunks(
                     "chars_total": int(trunc_info.get("chars_total", 0)),
                     "chars_sent": int(trunc_info.get("chars_sent", 0)),
                 })
+
+        # Observability net: any signal in this chunk that produced neither a
+        # reviewed entry nor a status means Groq returned an empty or unmappable
+        # object (e.g. {} or {"signals": []}). Record an explicit failure with the
+        # raw response captured so this can never be an invisible drop again.
+        for signal in chunk:
+            if signal.id not in reviewed and signal.id not in statuses:
+                statuses[signal.id] = {
+                    "status": "failed",
+                    "error_type": "empty_response",
+                    "error_message": (
+                        "model returned no usable signal item | raw: "
+                        + (llm.last_response_text or "")[:200]
+                    ),
+                    "last_attempt_at": now_iso,
+                }
+                print(
+                    f"[signal_stream] Groq returned no usable item for signal "
+                    f"{signal.id} (empty_response); marking failed.",
+                    file=sys.stderr,
+                )
     return reviewed, truncation_events, statuses
 
 
