@@ -4,6 +4,7 @@ import { useDisplaySettings, useExecutiveBriefing, useLatestRun, useSignals } fr
 import { FeaturedSignal } from "@/components/signals/FeaturedSignal";
 import { SignalListItem } from "@/components/signals/SignalListItem";
 import { Pagination } from "@/components/Pagination";
+import { MarkdownBlock, MarkdownInline } from "@/components/Markdown";
 import { Skeleton } from "@/components/ui/skeleton";
 import { relativeTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -284,7 +285,7 @@ function BriefingBlock({
 
       {/* Summary — macro story under the headline. */}
       {briefing.summary && (
-        <p className="mb-5 text-body text-foreground/85">{briefing.summary}</p>
+        <MarkdownBlock className="mb-5 text-body text-foreground/85">{briefing.summary}</MarkdownBlock>
       )}
 
       {/* Key takeaways — the punchy "you only read this" bullets. Prominent
@@ -294,7 +295,7 @@ function BriefingBlock({
           <div className="kicker mb-2">Key takeaways</div>
           <ul className="list-disc space-y-1.5 pl-5">
             {briefing.key_takeaways.map((item, i) => (
-              <li key={i} className="text-ui font-medium text-foreground">{item}</li>
+              <li key={i} className="text-ui font-medium text-foreground"><MarkdownInline>{item}</MarkdownInline></li>
             ))}
           </ul>
         </div>
@@ -312,12 +313,12 @@ function BriefingBlock({
                 </h3>
               )}
               {section.body && (
-                <p className="mb-2 text-body text-foreground/85">{section.body}</p>
+                <MarkdownBlock className="mb-2 text-body text-foreground/85">{section.body}</MarkdownBlock>
               )}
               {section.bullets && section.bullets.length > 0 && (
                 <ul className="list-disc space-y-1 pl-5">
                   {section.bullets.map((b, j) => (
-                    <li key={j} className="text-ui text-foreground/85">{b}</li>
+                    <li key={j} className="text-ui text-foreground/85"><MarkdownInline>{b}</MarkdownInline></li>
                   ))}
                 </ul>
               )}
@@ -335,7 +336,7 @@ function BriefingBlock({
               <li key={i} className="text-ui">
                 <span className="font-medium text-foreground">{theme.label}</span>
                 {theme.summary && (
-                  <span className="ml-2 text-muted-foreground">— {theme.summary}</span>
+                  <span className="ml-2 text-muted-foreground">— <MarkdownInline>{theme.summary}</MarkdownInline></span>
                 )}
               </li>
             ))}
@@ -349,7 +350,7 @@ function BriefingBlock({
           <div className="kicker mb-2">Insights</div>
           <ul className="list-disc space-y-1 pl-5">
             {briefing.insights.map((item, i) => (
-              <li key={i} className="text-ui italic text-foreground/80">{item}</li>
+              <li key={i} className="text-ui italic text-foreground/80"><MarkdownInline>{item}</MarkdownInline></li>
             ))}
           </ul>
         </div>
@@ -357,9 +358,9 @@ function BriefingBlock({
 
       {/* Cross-signal narrative — closing synthesis. */}
       {briefing.cross_signal_narrative && (
-        <p className="mb-5 text-body text-foreground/80">
+        <MarkdownBlock className="mb-5 text-body text-foreground/80">
           {briefing.cross_signal_narrative}
-        </p>
+        </MarkdownBlock>
       )}
 
       {/* Watch items — forward-looking alerts. */}
@@ -368,7 +369,7 @@ function BriefingBlock({
           <div className="kicker mb-2">Watch</div>
           <ul className="list-disc space-y-1 pl-5">
             {briefing.watch_items.map((item, i) => (
-              <li key={i} className="text-ui text-foreground/85">{item}</li>
+              <li key={i} className="text-ui text-foreground/85"><MarkdownInline>{item}</MarkdownInline></li>
             ))}
           </ul>
         </div>

@@ -299,12 +299,17 @@ def generate_briefing_from_artifacts(
     brain: BrainClient,
     editor_prompt: str,
     run_context: dict[str, Any],
+    editor_model: str | None = None,
 ) -> dict[str, Any]:
     """Reduce top signals into one executive briefing via a single Groq call.
 
     Pure reducer — reads artifacts and short summaries only, never re-fetches.
     Raises RuntimeError on LLM failure or unrecoverable shape mismatch so
     _call_editor() handles it cleanly.
+
+    editor_model: optional model override for this single brief call. The brief
+    is one small call, so it can use a stronger model than the per-article review
+    (which stays on the configured base model). None → base model.
     """
     if not top_signals:
         raise RuntimeError("No signals provided to generate briefing from.")
@@ -331,6 +336,7 @@ def generate_briefing_from_artifacts(
         json.dumps(payload, sort_keys=True),
         EDITOR_BRIEFING_SCHEMA,
         required_fields=["headline", "briefing_paragraphs"],
+        model=editor_model,
     )
     if not raw:
         raise RuntimeError(f"Editor Groq call returned nothing: {brain.last_error or 'unknown error'}")
