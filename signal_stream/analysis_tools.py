@@ -15,7 +15,7 @@ from .models import AgentRunLog, Article, ClusterInsight, Signal, SignalConfig, 
 from .prompt_loader import DEFAULT_SCORING_RUBRIC
 from .source_tools import fetch_full_article_page
 from .storage import SignalStorage
-from .text import first_sentences, normalize_space, phrase_hits
+from .text import first_sentences, normalize_space, phrase_hits, preserve_markdown_text
 
 
 # ---------------------------------------------------------------------------
@@ -515,12 +515,14 @@ def _apply_model_updates(
         repaired = _repair_lazy_summary(llm, analyst_prompt, signal, review_context.get(signal.id, {}), behavior)
         model_short = repaired.get("short_summary", "")
         if behavior.get("summary_mode") != "short_only" and repaired.get("expanded_summary"):
-            signal.expanded_summary = repaired["expanded_summary"]
+            # preserve_markdown_text, not normalize_space: keep the model's bullets/tables.
+            signal.expanded_summary = preserve_markdown_text(repaired["expanded_summary"])
     signal.short_summary = model_short or signal.short_summary or signal.summary
     if behavior.get("summary_mode") == "short_only":
         signal.expanded_summary = ""
     else:
-        signal.expanded_summary = normalize_space(item.get("expanded_summary", signal.expanded_summary or signal.short_summary)) or signal.expanded_summary or signal.short_summary
+        # preserve_markdown_text keeps newlines/pipes so rich formatting survives the save.
+        signal.expanded_summary = preserve_markdown_text(item.get("expanded_summary", signal.expanded_summary or signal.short_summary)) or signal.expanded_summary or signal.short_summary
     signal.summary = signal.short_summary
     signal.why_it_matters = normalize_space(item.get("why_it_matters", signal.why_it_matters)) or signal.why_it_matters
     signal.entities = _merge_entities(signal.entities, item.get("entities", {}), behavior)
@@ -1219,7 +1221,8 @@ def _repair_lazy_summary(
         return {}
     return {
         "short_summary": short,
-        "expanded_summary": normalize_space(raw.get("expanded_summary", "")),
+        # preserve_markdown_text: the repair path can also return structured markdown.
+        "expanded_summary": preserve_markdown_text(raw.get("expanded_summary", "")),
     }
 
 

@@ -54,6 +54,24 @@ export function scoreLabel(score: number | null | undefined): string {
   return `${Math.round(score)}/100`;
 }
 
+// Strip common Markdown syntax to plain text for short previews (hover cards)
+// where rendering full markdown is overkill and raw marks like ** or | would
+// leak. Not a parser — it just removes the marks.
+export function stripMarkdown(value: string | null | undefined): string {
+  if (!value) return "";
+  let text = value;
+  text = text.replace(/```[a-zA-Z0-9]*\n?/g, "");        // fenced code markers
+  text = text.replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1");  // images → alt text
+  text = text.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1");   // links → link text
+  text = text.replace(/^[\s|:-]*\|[\s|:-]*$/gm, "");     // table separator rows
+  text = text.replace(/\|/g, " ");                        // remaining table pipes
+  text = text.replace(/^\s{0,3}(#{1,6}|>)\s*/gm, "");    // heading / quote markers
+  text = text.replace(/^\s*([-*+]|\d+\.)\s+/gm, "");     // list markers
+  text = text.replace(/(\*\*|__|\*|_|~~|`)/g, "");        // emphasis / inline code
+  text = text.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n");
+  return text.trim();
+}
+
 // Try parsing a stringified JSON payload; return undefined on failure so callers
 // can decide whether to show a raw string or hide the section.
 export function tryParse<T = unknown>(raw: string | null | undefined): T | undefined {

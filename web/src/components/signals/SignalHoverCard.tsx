@@ -1,6 +1,7 @@
 import * as React from "react";
 import * as TooltipPrimitive from "@radix-ui/react-tooltip";
 import { cn } from "@/lib/utils";
+import { stripMarkdown } from "@/lib/format";
 
 interface SignalHoverCardProps {
   // The multi-paragraph article outline. Falls back to summary when
@@ -20,7 +21,9 @@ interface SignalHoverCardProps {
 // is split on blank lines into paragraphs; if no paragraph breaks exist we
 // render the whole string as one block.
 export function SignalHoverCard({ content, children, className }: SignalHoverCardProps) {
-  const text = (content ?? "").trim();
+  // Strip markdown: expanded_summary is now markdown, but the hover shows plain
+  // paragraphs — raw **, |, # would otherwise leak into the preview.
+  const text = stripMarkdown(content);
   // Skip the hover entirely when there's nothing useful to show — avoids
   // empty popovers on signals where neither expanded_summary nor summary
   // ended up populated by the analyst.

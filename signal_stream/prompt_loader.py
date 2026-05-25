@@ -120,6 +120,9 @@ DEFAULT_BEHAVIOR_SETTINGS: dict[str, Any] = {
     # the Briefing. If no signal in the latest run clears this floor, the
     # Briefing falls back to the most recent prior run, tagged as stale.
     "executive_summary_min_score": 45,
+    # Model used ONLY for the executive briefing (one Groq call). Lets the brief
+    # run on a stronger model than per-article review. Empty → use [brain].model.
+    "editor_model": "openai/gpt-oss-120b",
     # Critic-loop defaults: opt-in. Existing runs keep the old three-agent shape.
     "enable_critic": True,
     "max_critic_rounds": 1,
@@ -188,6 +191,11 @@ def load_behavior_settings(path: str | Path | None) -> dict[str, Any]:
         value = str(behavior.get(key, "")).strip().lower()
         if value:
             settings[key] = value
+    # editor_model is a model ID — case-sensitive (e.g. "openai/gpt-oss-120b"),
+    # so it is NOT lowercased like the text_keys above. Empty string is allowed
+    # and means "fall back to the base [brain].model".
+    if "editor_model" in behavior:
+        settings["editor_model"] = str(behavior.get("editor_model", "")).strip()
     if "scout_note_enabled" in behavior:
         settings["scout_note_enabled"] = bool(behavior.get("scout_note_enabled"))
     if "analyst_full_review" in behavior:
@@ -432,6 +440,8 @@ def _render_brain_toml(
             f"analyst_retry_max_attempts = {int(behavior.get('analyst_retry_max_attempts', 1))}",
             f"executive_summary_limit = {int(behavior.get('executive_summary_limit', 12))}",
             f"executive_summary_min_score = {int(behavior.get('executive_summary_min_score', 45))}",
+            "# Model for the executive briefing only (one Groq call). Empty = use [brain].model.",
+            f'editor_model = "{_toml_text(behavior.get("editor_model", "openai/gpt-oss-120b"))}"',
             f'summary_mode = "{_toml_text(behavior.get("summary_mode", "short_expanded"))}"',
             f'visuals_mode = "{_toml_text(behavior.get("visuals_mode", "image_icon"))}"',
             f'entity_extraction = "{_toml_text(behavior.get("entity_extraction", "hybrid"))}"',

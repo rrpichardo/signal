@@ -246,7 +246,7 @@ class TestGroqResponseMissingFieldsRetriesOnce(unittest.TestCase):
 
         call_count = 0
 
-        def fake_call_groq(system, user, temperature):
+        def fake_call_groq(system, user, temperature, model=None):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -282,7 +282,7 @@ class TestGroqResponseInvalidAfterRetrySkipsSignal(unittest.TestCase):
         """If both attempts fail validation, chat_json returns None and sets last_error."""
         from signal_stream.llm import BrainClient
 
-        def fake_call_groq(system, user, temperature):
+        def fake_call_groq(system, user, temperature, model=None):
             # Always missing required fields
             return {"signals": [{"id": "x", "score": 50}]}
 
