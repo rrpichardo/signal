@@ -147,7 +147,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f"API key set: {'yes' if api_key_set else 'no'}")
         client = BrainClient(config)
         available = client.available()
-        print(f"Brain: Groq (model={config.brain.model}) — {'available' if available else 'unavailable'}")
+        print(f"Brain: Groq — {'reachable' if available else 'unreachable'}")
+        if available:
+            # Report the review model and the briefing model separately — they can
+            # differ (the brief can run on a stronger model). model_available()
+            # confirms each ID is actually served to this account, not just that
+            # the endpoint is up.
+            from .prompt_loader import load_behavior_settings
+            behavior = load_behavior_settings(config.agent.brain_file)
+            review_model = config.brain.model
+            editor_model = (behavior.get("editor_model") or "").strip() or review_model
+            print(f"  Review model:   {review_model} — {'available' if client.model_available(review_model) else 'NOT FOUND for this key'}")
+            if editor_model == review_model:
+                print(f"  Briefing model: {editor_model} (same as review)")
+            else:
+                print(f"  Briefing model: {editor_model} — {'available' if client.model_available(editor_model) else 'NOT FOUND for this key'}")
         if client.last_error:
             print(f"Brain error: {_explain_brain_error(client.last_error)}")
         return 0

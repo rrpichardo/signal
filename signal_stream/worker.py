@@ -195,7 +195,11 @@ def handle_task(
             for s in top_signals_raw
         ]
         llm = BrainClient(config)
-        briefing = generate_briefing_from_artifacts(top_signals, llm, editor_prompt, run_context)
+        # Brief-only model override: the editor's single call can use a stronger
+        # model than per-article review. Read it here — the actual Groq call
+        # happens in THIS worker process, not in agent_runtime._call_editor.
+        editor_model = behavior.get("editor_model") or None
+        briefing = generate_briefing_from_artifacts(top_signals, llm, editor_prompt, run_context, editor_model=editor_model)
         coverage = briefing.get("artifact_coverage", {})
         has_gap = coverage.get("missing", 0) > 0 or coverage.get("thin", 0) > 0
         status = "partial" if has_gap else "generated"

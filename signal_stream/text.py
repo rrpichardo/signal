@@ -7,6 +7,10 @@ from typing import Iterable
 
 TAG_RE = re.compile(r"<[^>]+>")
 SPACE_RE = re.compile(r"\s+")
+# Markdown-safe whitespace cleanup: collapse only horizontal runs (spaces/tabs)
+# within a line, never touch newlines. A separate pass squeezes 3+ blank lines.
+INLINE_SPACE_RE = re.compile(r"[ \t]+")
+BLANK_LINES_RE = re.compile(r"\n{3,}")
 WORD_RE = re.compile(r"[a-z0-9][a-z0-9'-]{1,}", re.IGNORECASE)
 SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
 ENTITY_RE = re.compile(r"\b(?:[A-Z][A-Za-z0-9&'.-]+(?:\s+|$)){2,5}")
@@ -47,6 +51,20 @@ def clean_html(value: str | None) -> str:
 
 def normalize_space(value: str | None) -> str:
     return SPACE_RE.sub(" ", value or "").strip()
+
+
+def preserve_markdown_text(value: str | None) -> str:
+    # Markdown-aware cleanup for multi-line fields (e.g. expanded_summary).
+    # Unlike normalize_space, this keeps newlines and table pipes intact so the
+    # model's bullets, headings, and tables survive the save path.
+    if not value:
+        return ""
+    # Collapse trailing/leading horizontal whitespace per line, keep the newline.
+    lines = [INLINE_SPACE_RE.sub(" ", line).strip() for line in value.split("\n")]
+    text = "\n".join(lines)
+    # Squeeze 3+ blank lines down to a single blank line (one paragraph break).
+    text = BLANK_LINES_RE.sub("\n\n", text)
+    return text.strip()
 
 
 def tokenize(value: str | None) -> set[str]:

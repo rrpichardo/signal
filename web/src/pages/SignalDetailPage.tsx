@@ -9,6 +9,7 @@ import { EntitiesPanel } from "@/components/signals/EntitiesPanel";
 import { RelatedSignalsRail } from "@/components/signals/RelatedSignalsRail";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Separator } from "@/components/ui/separator";
+import { MarkdownBlock } from "@/components/Markdown";
 import { ArrowLeft } from "lucide-react";
 import type { AnalystArtifact } from "@/lib/types";
 
@@ -86,12 +87,8 @@ export default function SignalDetailPage() {
 
       <Separator className="my-8" />
 
-      {/* Article body — expanded_summary as prose-editorial text. */}
-      <div className="prose-editorial">
-        {signal.expanded_summary?.split("\n\n").map((para, i) => (
-          <p key={i} className={i > 0 ? "mt-4" : ""}>{para}</p>
-        ))}
-      </div>
+      {/* Article body — expanded_summary rendered as markdown (lede, bullets, tables). */}
+      <MarkdownBlock className="prose-editorial">{signal.expanded_summary ?? ""}</MarkdownBlock>
 
       {/* Why it matters — pull-quote block. */}
       {signal.why_it_matters && (

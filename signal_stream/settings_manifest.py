@@ -144,6 +144,25 @@ SETTINGS_MANIFEST: list[dict[str, Any]] = [
        ),
        control="slider", min=0, max=100, step=5, timing="next_run"),
 
+    _e("behavior.editor_model", file="brain", group="agent", label="Briefing model",
+       help=(
+           "Which AI model writes the Intelligence Briefing at the top of the digest. "
+           "This is ONE call, so it can use a bigger, smarter model than the per-article "
+           "review (which always stays on the fast model). "
+           "'openai/gpt-oss-120b' = strongest free option, best briefs, but a tight rate limit "
+           "so the longest briefs may pause ~1 minute to retry. "
+           "'llama-3.3-70b-versatile' = strong with more headroom (no pauses). "
+           "'meta-llama/llama-4-scout-17b-16e-instruct' = same fast model as review. "
+           "Leave blank to reuse the review model."
+       ),
+       control="select",
+       options=[
+           "openai/gpt-oss-120b",
+           "llama-3.3-70b-versatile",
+           "meta-llama/llama-4-scout-17b-16e-instruct",
+       ],
+       timing="next_run"),
+
     _e("behavior.enable_critic", file="brain", group="agent", label="Critic review pass",
        help=(
            "When on, a Critic agent reads the full proposed digest before it's finalized and scores it. "

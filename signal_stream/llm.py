@@ -55,6 +55,34 @@ class BrainClient:
             self.last_error = str(exc)
             return False
 
+    def model_available(self, model_id: str) -> bool:
+        """True if `model_id` is in this account's live /models list.
+
+        Used by `doctor` to verify the review model AND the brief model resolve,
+        instead of only checking that the endpoint is reachable (available()).
+        """
+        if not self._api_key:
+            self.last_error = "GROQ_API_KEY not set."
+            return False
+        if not model_id:
+            return False
+        try:
+            req = request.Request(
+                "https://api.groq.com/openai/v1/models",
+                headers={
+                    "Authorization": f"Bearer {self._api_key}",
+                    "User-Agent": GROQ_USER_AGENT,
+                },
+                method="GET",
+            )
+            with request.urlopen(req, timeout=8) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            ids = {str(m.get("id", "")) for m in data.get("data", [])}
+            return model_id in ids
+        except Exception as exc:  # noqa: BLE001
+            self.last_error = str(exc)
+            return False
+
     def chat_json(
         self,
         system: str,
@@ -63,26 +91,28 @@ class BrainClient:
         *,
         temperature: float = 0.0,
         required_fields: list[str] | None = None,
+        model: str | None = None,
     ) -> dict[str, Any] | None:
         """Call Groq and return parsed JSON, or None on failure.
 
         schema param is accepted for API compatibility but Groq uses
         response_format=json_object instead of a full schema object.
         required_fields: if supplied, retries once if any field is missing/empty.
+        model: optional per-call model override; defaults to the configured model.
         """
         if not self._api_key:
             self.last_error = "GROQ_API_KEY not set."
             return None
 
         self.last_response_text = ""
-        result = self._call_groq(system, user, temperature)
+        result = self._call_groq(system, user, temperature, model)
 
         if result is not None and required_fields:
             missing = [f for f in required_fields if not result.get(f)]
             if missing:
                 # Retry once with an explicit instruction about missing fields.
                 user_retry = user + f"\n\nIMPORTANT: You MUST include these fields in your JSON response: {', '.join(missing)}"
-                result = self._call_groq(system, user_retry, temperature)
+                result = self._call_groq(system, user_retry, temperature, model)
                 if result is not None:
                     still_missing = [f for f in required_fields if not result.get(f)]
                     if still_missing:
@@ -91,7 +121,7 @@ class BrainClient:
 
         return result
 
-    def _call_groq(self, system: str, user: str, temperature: float) -> dict[str, Any] | None:
+    def _call_groq(self, system: str, user: str, temperature: float, model: str | None = None) -> dict[str, Any] | None:
         """Single Groq API call with 429 retry. Returns parsed dict or None."""
         messages = []
         if system:
@@ -99,7 +129,7 @@ class BrainClient:
         messages.append({"role": "user", "content": user})
 
         payload: dict[str, Any] = {
-            "model": self.config.model,
+            "model": model or self.config.model,
             "messages": messages,
             "response_format": {"type": "json_object"},
             "temperature": temperature,
