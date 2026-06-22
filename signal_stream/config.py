@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 import tomllib
 from typing import Any
 
@@ -13,6 +14,25 @@ def _resolve(base_dir: Path, value: str | None, default: str) -> str:
     if not path.is_absolute():
         path = (base_dir / path).resolve()
     return str(path)
+
+
+def _repo_root(start: Path) -> Path:
+    # git rev-parse --git-common-dir returns the shared .git dir for both the
+    # main checkout and any linked worktrees, so its parent is always the main
+    # repo root regardless of which worktree we're called from.
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            capture_output=True, text=True, cwd=start, check=False,
+        )
+        if r.returncode == 0:
+            git_dir = Path(r.stdout.strip())
+            if not git_dir.is_absolute():
+                git_dir = (start / git_dir).resolve()
+            return git_dir.parent
+    except Exception:
+        pass
+    return start
 
 
 def _list(value: Any) -> list[str]:
@@ -29,6 +49,7 @@ def load_config(path: str | Path = "configs/demo.toml") -> SignalConfig:
         raw = tomllib.load(handle)
 
     base_dir = config_path.parent
+    repo_root = _repo_root(base_dir)
     profile = raw.get("profile", {})
     storage = raw.get("storage", {})
     delivery = raw.get("delivery", {})
@@ -70,7 +91,7 @@ def load_config(path: str | Path = "configs/demo.toml") -> SignalConfig:
         markets=_list(profile.get("markets", [])),
         priorities=priorities,
         sources=sources,
-        storage_path=_resolve(base_dir, storage.get("path"), "../.signal_stream/signal_stream.db"),
+        storage_path=_resolve(repo_root, storage.get("path"), ".signal_stream/signal_stream.db"),
         output_dir=_resolve(base_dir, delivery.get("output_dir"), "../outputs"),
         digest_limit=int(delivery.get("digest_limit", 10)),
         critical_threshold=int(delivery.get("critical_threshold", 82)),

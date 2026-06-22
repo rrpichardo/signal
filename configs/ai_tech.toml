@@ -7,7 +7,7 @@ competitors = ["OpenAI", "Anthropic", "Google", "Meta", "Microsoft", "NVIDIA", "
 markets = ["AI", "generative AI", "LLM", "agents", "developer tools", "chips", "cloud", "enterprise software", "startups", "venture capital"]
 
 [storage]
-path = "../.signal_stream/signal_stream.db"
+path = ".signal_stream/signal_stream.db"
 
 [delivery]
 output_dir = "../outputs"
