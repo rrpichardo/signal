@@ -6,14 +6,28 @@ from html.parser import HTMLParser
 from pathlib import Path
 import json
 import re
+import time
 import urllib.parse
 import xml.etree.ElementTree as ET
 from typing import Any
-from urllib import error, request
+from urllib import request
 
 from .llm import BrainClient
 from .models import Article, SourceConfig
 from .text import clean_html, normalize_space
+
+# Optional dependency: real YouTube transcript fetching. Guarded so the backend
+# still runs (falling back to the video description) if it isn't pip-installed.
+try:
+    from youtube_transcript_api import (
+        RequestBlocked,
+        YouTubeRequestFailed,
+        YouTubeTranscriptApi,
+    )
+
+    _YT_TRANSCRIPT_AVAILABLE = True
+except ImportError:  # pragma: no cover - only hit when the optional dep is absent
+    _YT_TRANSCRIPT_AVAILABLE = False
 
 
 USER_AGENT = "SignalStreamAgentic/0.1"
@@ -491,26 +505,32 @@ def _youtube_description(entry: ET.Element) -> str:
     return clean_html(_child_text(entry, "summary"))
 
 
+_YT_TRANSCRIPT_RETRIES = 4
+
+
 def _fetch_youtube_transcript(video_id: str | None) -> str:
-    if not video_id:
+    # Skip when there's no id or the optional library isn't installed; the
+    # caller falls back to the video description in both cases.
+    if not video_id or not _YT_TRANSCRIPT_AVAILABLE:
         return ""
-    # The timedtext endpoint is undocumented and frequently returns nothing.
-    # Try a couple of XML caption variants; the description fallback in
-    # _load_youtube_source covers us when no captions come back.
-    for extra in ({"fmt": "srv3"}, {}):
-        params = {"v": video_id, "lang": "en", **extra}
-        url = f"https://video.google.com/timedtext?{urllib.parse.urlencode(params)}"
+    api = YouTubeTranscriptApi()
+    for attempt in range(_YT_TRANSCRIPT_RETRIES):
         try:
-            root = _fetch_xml(url)
-        except (error.URLError, ET.ParseError, TimeoutError, ValueError):
+            fetched = api.fetch(video_id)
+        except (RequestBlocked, YouTubeRequestFailed):
+            # YouTube intermittently throttles by IP. Back off and retry; on
+            # the final attempt give up and let the description fallback run.
+            if attempt == _YT_TRANSCRIPT_RETRIES - 1:
+                return ""
+            time.sleep(2 * (attempt + 1))
             continue
-        chunks = [
-            "".join(text.itertext())
-            for text in root.iter()
-            if _local_name(text.tag) == "text"
-        ]
-        if chunks:
-            return normalize_space(clean_html(" ".join(chunks)))
+        except Exception:
+            # No captions, captions disabled, or video unavailable — a
+            # permanent miss for this video, so stop and fall back quietly.
+            return ""
+        # fetched is iterable; each snippet carries the spoken text fragment.
+        text = " ".join(snippet.text for snippet in fetched)
+        return normalize_space(clean_html(text))
     return ""
 
 
