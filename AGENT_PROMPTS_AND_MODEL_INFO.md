@@ -10,7 +10,7 @@ It explains:
 - what tools each agent can use
 - where to edit things
 
-Last updated: 2026-05-04
+Last updated: 2026-06-22
 
 ## 1. System Overview
 
@@ -47,47 +47,43 @@ The Critic is opt-in. Set `enable_critic = true` in `configs/agent_brain.toml` t
 
 ### Current model provider
 
-Signal Stream uses **Ollama** locally.
+Signal Stream uses **Groq** as the hosted brain.
 
-This means the model runs on your computer instead of a paid hosted API.
+Authentication: `GROQ_API_KEY` environment variable. The app does not auto-load `.env` — you must export it before running.
+
+```bash
+export GROQ_API_KEY=<your-key>
+```
 
 ### Current model
 
 ```text
-qwen3:1.7b
-```
-
-### Ollama host
-
-```text
-http://localhost:11434
+meta-llama/llama-4-scout-17b-16e-instruct
 ```
 
 ### Config location
 
-These settings live in `configs/ai_tech.toml`:
+These settings live in `configs/ai_tech.toml` under `[brain]`:
 
 ```toml
-[ollama]
-enabled = true
-model = "qwen3:1.7b"
-host = "http://localhost:11434"
+[brain]
+model = "meta-llama/llama-4-scout-17b-16e-instruct"
 timeout_seconds = 60
 ```
 
 ### Agent runtime settings
 
-Runtime limits live in `configs/ai_tech.toml`:
+Runtime limits live in `configs/ai_tech.toml` under `[agent]`:
 
 ```toml
 [agent]
 max_iterations = 6
-min_signals = 8
 dashboard_port = 8765
-worker_timeout_seconds = 120
-max_article_age_days = 14
+worker_timeout_seconds = 2400
 brain_file = "agent_brain.toml"
-require_ollama = true
+scout_mode = "hybrid"
+analyst_mode = "hybrid"
+require_brain = true
 allow_mock_brain = false
 ```
 
@@ -99,20 +95,24 @@ scout_mode = "hybrid"
 analyst_mode = "hybrid"
 relevance_policy = "soft_keep"
 model_score_adjustment_limit = 20
+analyst_review_limit = 40
+analyst_review_batch_size = 1
+analyst_full_review = true
 ```
 
 Plain English:
 
 - `max_iterations`: maximum number of Orchestrator thinking rounds.
-- `min_signals`: how many good signals are enough to stop.
 - `dashboard_port`: where the local dashboard runs.
 - `worker_timeout_seconds`: how long workers are allowed to take.
-- `max_article_age_days`: old articles are ignored after this many days.
 - `brain_file`: where the live prompts and scoring settings are loaded from.
 - `scout_mode`: whether Scout uses only code or also uses the model.
 - `analyst_mode`: whether Analyst uses only code or also uses the model.
-- `require_ollama`: the real agent run fails if Ollama is not available.
-- `allow_mock_brain`: test mode only; do not use for the real product.
+- `require_brain`: the real agent run fails if Groq is not reachable or the key is missing.
+- `allow_mock_brain`: test/demo mode only; do not use for the real product.
+- `analyst_review_limit`: max articles sent to Groq for review (default 40).
+- `analyst_review_batch_size`: articles per Groq request (1 = one article per call).
+- `model_score_adjustment_limit`: how many points Groq can shift the Python base score (default 20).
 
 ## 3. Agent 1: Orchestrator
 
@@ -130,14 +130,14 @@ It looks at the current state and decides the next move:
 - critique digest (opt-in, when enable_critic = true)
 - finalize the digest
 
-The Orchestrator always makes live model calls to Ollama in the real agent run.
+The Orchestrator always makes live model calls to Groq in the real agent run.
 
 ### Model
 
 ```text
-Provider: Ollama
-Model: qwen3:1.7b
-Host: http://localhost:11434
+Provider: Groq
+Model: meta-llama/llama-4-scout-17b-16e-instruct
+Auth: GROQ_API_KEY environment variable
 ```
 
 ### Exact prompt
@@ -224,7 +224,7 @@ This is intentional for the local MVP:
 ```text
 Current live model calls:
 - code mode: none
-- hybrid mode: optional Ollama enrichment after fetching
+- hybrid mode: optional Groq enrichment after fetching
 - model mode: same path for now, intended to rely more on the model over time
 Worker type: separate Python process
 ```
@@ -249,7 +249,7 @@ Scout can:
 - fetch Atom feeds
 - read sample JSON files
 - fetch YouTube channel feeds
-- attempt YouTube transcript lookup
+- fetch YouTube transcripts via `youtube-transcript-api` (with description fallback when captions aren't available)
 - report source failures without crashing the whole run
 - search already-collected articles for more context
 
@@ -294,8 +294,8 @@ Analyst reads its prompt from the editable brain file, but whether it actually u
 ```text
 Current live model calls:
 - code mode: none
-- hybrid mode: Ollama reviews and adjusts scored signals
-- model mode: Ollama review score is trusted more strongly
+- hybrid mode: Groq reviews and adjusts scored signals
+- model mode: Groq review score is trusted more strongly
 Worker type: separate Python process
 ```
 
@@ -361,14 +361,14 @@ The Critic is **opt-in** and off by default. Set `enable_critic = true` in `conf
 
 Critic runs as a separate Python worker process, the same way Scout and Analyst do.
 
-It always runs a code-based quality check. When `analyst_mode` is `hybrid` or `model`, it also asks Ollama to review the digest.
+It always runs a code-based quality check. When `analyst_mode` is `hybrid` or `model`, it also asks Groq to review the digest.
 
 ### Model
 
 ```text
 Current live model calls:
 - code mode: none (code checks only)
-- hybrid/model mode: optional Ollama review of the full signal list
+- hybrid/model mode: optional Groq review of the full signal list
 Worker type: separate Python process
 ```
 
@@ -410,7 +410,7 @@ Critic can:
 - flag missing or too-short why-it-matters text
 - flag missing or too-short summaries
 - flag very low-scoring signals (score < 20)
-- optionally ask Ollama to review the full signal list and surface subtler problems
+- optionally ask Groq to review the full signal list and surface subtler problems
 
 Current Critic task type:
 
@@ -483,9 +483,9 @@ Priorities live in `configs/ai_tech.toml`.
 
 Analyst uses these to score what matters.
 
-### AI platform shifts
+### Frontier AI product and model launches
 
-Major model, platform, pricing, developer ecosystem, or product moves.
+Major model releases, capability jumps, frontier lab launches, and pricing/access changes.
 
 ### Startup and investment signals
 
@@ -546,7 +546,7 @@ The dashboard shows:
 
 ## 11. Main Run Commands
 
-Check that Ollama is available:
+Check system health:
 
 ```bash
 python3 -m signal_stream doctor --config configs/ai_tech.toml
@@ -555,6 +555,7 @@ python3 -m signal_stream doctor --config configs/ai_tech.toml
 Run the agent:
 
 ```bash
+export GROQ_API_KEY=<your-key>
 python3 -m signal_stream agent run --config configs/ai_tech.toml
 ```
 
@@ -577,25 +578,15 @@ python3 -m signal_stream memory show --config configs/ai_tech.toml --limit 10
 Edit `configs/ai_tech.toml`:
 
 ```toml
-[ollama]
-model = "qwen3:1.7b"
+[brain]
+model = "meta-llama/llama-4-scout-17b-16e-instruct"
 ```
 
-Example alternatives:
-
-- `llama3.2:1b`
-- `llama3.2:3b`
-- `qwen3:4b`
+The model must be available on Groq. See [console.groq.com/docs/models](https://console.groq.com/docs/models) for the current list.
 
 ### To change agent behavior
 
-Edit `signal_stream/prompts.py`.
-
-Important:
-
-- The Orchestrator prompt affects live model decisions now.
-- Scout and Analyst prompts are currently reference/future-upgrade prompts.
-- Scout and Analyst behavior is mostly controlled by `source_tools.py`, `analysis_tools.py`, and `configs/ai_tech.toml`.
+Edit `configs/agent_brain.toml`. This is the live, operator-facing source of truth for prompts and scoring. Python fallbacks in `signal_stream/prompts.py` are only used if the TOML file is missing.
 
 ### To change what gets monitored
 
@@ -613,17 +604,13 @@ Edit this value in `configs/ai_tech.toml`:
 max_article_age_days = 14
 ```
 
-## 13. Important Current Limitation
-
-Right now:
-
-- Orchestrator is model-driven.
-- Scout can be `code`, `hybrid`, or `model`.
-- Analyst can be `code`, `hybrid`, or `model`.
-
-Current default behavior settings in `configs/agent_brain.toml` are:
+## 13. Current Behavior Modes
 
 ```toml
 scout_mode = "hybrid"
 analyst_mode = "hybrid"
 ```
+
+- `code` — Python logic only, no Groq calls from that agent.
+- `hybrid` — Python scores first, then Groq reviews and can adjust by up to `model_score_adjustment_limit` points.
+- `model` — Groq review is trusted more strongly.
