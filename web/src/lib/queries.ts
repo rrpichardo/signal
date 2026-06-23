@@ -165,3 +165,12 @@ export function useRemoveSource() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["sources"] }),
   });
 }
+
+export function useAddSource() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (source: Parameters<typeof api.addSource>[0]) =>
+      api.addSource(source),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["sources"] }),
+  });
+}

@@ -462,7 +462,10 @@ def _load_youtube_source(source: SourceConfig) -> list[Article]:
         url = f"https://www.youtube.com/watch?v={video_id}" if video_id else _entry_link(entry)
         published_at = _child_text(entry, "published", "updated")
         transcript = _fetch_youtube_transcript(video_id) if video_id else ""
-        body = transcript or clean_html(_child_text(entry, "description", "summary"))
+        # Body fallback: YouTube nests the description under media:group/
+        # media:description, so a direct-child scan misses it entirely. Recover
+        # it so a video that has no transcript still carries real content.
+        body = transcript or _youtube_description(entry)
         raw = {"video_id": video_id, "transcript_available": bool(transcript), "source_type": "youtube"}
         articles.append(Article.from_fields(source=source.name, title=title, url=url, published_at=published_at, body=body, raw=raw))
     return articles
@@ -475,20 +478,40 @@ def _fetch_xml(url: str) -> ET.Element:
     return ET.fromstring(payload)
 
 
+def _youtube_description(entry: ET.Element) -> str:
+    # YouTube puts the video description at media:group > media:description,
+    # not as a direct child of <entry>, so walk descendants for the first
+    # 'description' element. Falls back to a direct-child <summary> scan for
+    # plain Atom feeds.
+    for el in entry.iter():
+        if _local_name(el.tag) == "description":
+            text = "".join(el.itertext()).strip()
+            if text:
+                return normalize_space(clean_html(text))
+    return clean_html(_child_text(entry, "summary"))
+
+
 def _fetch_youtube_transcript(video_id: str | None) -> str:
     if not video_id:
         return ""
-    params = urllib.parse.urlencode({"v": video_id, "fmt": "srv3", "lang": "en"})
-    url = f"https://video.google.com/timedtext?{params}"
-    try:
-        root = _fetch_xml(url)
-    except (error.URLError, ET.ParseError, TimeoutError, ValueError):
-        return ""
-    chunks = []
-    for text in root.iter():
-        if _local_name(text.tag) == "text":
-            chunks.append("".join(text.itertext()))
-    return normalize_space(clean_html(" ".join(chunks)))
+    # The timedtext endpoint is undocumented and frequently returns nothing.
+    # Try a couple of XML caption variants; the description fallback in
+    # _load_youtube_source covers us when no captions come back.
+    for extra in ({"fmt": "srv3"}, {}):
+        params = {"v": video_id, "lang": "en", **extra}
+        url = f"https://video.google.com/timedtext?{urllib.parse.urlencode(params)}"
+        try:
+            root = _fetch_xml(url)
+        except (error.URLError, ET.ParseError, TimeoutError, ValueError):
+            continue
+        chunks = [
+            "".join(text.itertext())
+            for text in root.iter()
+            if _local_name(text.tag) == "text"
+        ]
+        if chunks:
+            return normalize_space(clean_html(" ".join(chunks)))
+    return ""
 
 
 def _feed_entries(root: ET.Element) -> list[ET.Element]:

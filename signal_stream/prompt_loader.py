@@ -50,6 +50,12 @@ DEFAULT_SCORING_RUBRIC: dict[str, Any] = {
         "minor_product_launch": 55,
         "duplicate_or_stale_repeat": 40,
     },
+    # Additive score bonus by article source_type. Curated YouTube channels are
+    # high-signal picks, so reward them rather than treating video as a downside.
+    # Applied to the value score before the trust penalty; tune in agent_brain.toml.
+    "source_bonuses": {
+        "youtube": 8,
+    },
     # Internal helper bands. These are still loaded for backwards compatibility,
     # but the visible score now comes from the V2 value/trust rubric above.
     "recency_bands": {
@@ -164,7 +170,7 @@ def load_scoring_rubric(path: str | Path | None) -> dict[str, Any]:
     scoring = raw.get("scoring", {})
     for section in ("value_weights", "trust_weights", "trust_penalty"):
         _merge_number_section(rubric[section], scoring.get(section, {}))
-    for section in ("hard_caps", "recency_bands", "event_strength_bands",
+    for section in ("hard_caps", "source_bonuses", "recency_bands", "event_strength_bands",
                     "priority_match_bands", "company_match_bands", "corroboration_bands"):
         _merge_int_section(rubric[section], scoring.get(section, {}))
     return rubric
@@ -316,7 +322,7 @@ def save_brain_file(path: str | Path, brain: dict[str, Any]) -> None:
     incoming_scoring = dict(brain.get("scoring") or {})
     for section in ("value_weights", "trust_weights", "trust_penalty"):
         _merge_number_section(scoring[section], incoming_scoring.get(section, {}))
-    for section in ("hard_caps", "recency_bands", "event_strength_bands",
+    for section in ("hard_caps", "source_bonuses", "recency_bands", "event_strength_bands",
                     "priority_match_bands", "company_match_bands", "corroboration_bands"):
         _merge_int_section(scoring[section], incoming_scoring.get(section, {}))
 

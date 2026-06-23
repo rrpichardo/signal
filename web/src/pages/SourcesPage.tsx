@@ -5,11 +5,21 @@ import {
   useTestAllSources,
   useToggleSource,
   useRemoveSource,
+  useAddSource,
 } from "@/lib/queries";
 import { Source } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { pushToast } from "@/hooks/use-toast";
 import { CircleHelp, Lock, Unlock } from "lucide-react";
 
@@ -79,6 +89,206 @@ function PaidBadge({ health }: { health: Source["health"] }) {
   );
 }
 
+const SOURCE_KINDS = ["rss", "atom", "youtube", "html_scrape"] as const;
+
+// Resolve pasted YouTube input to a channel id (UC…). Returns handleBlocked when
+// the user gave an @handle or /c/ vanity URL we can't resolve without an API call
+// — that's the predictable wrong input we want to catch before a dead source is saved.
+function parseYouTubeChannelId(
+  input: string,
+): { channelId?: string; handleBlocked?: boolean } {
+  const v = input.trim();
+  if (!v) return {};
+  if (/^UC[\w-]{20,}$/.test(v)) return { channelId: v };
+  const m = v.match(/youtube\.com\/channel\/(UC[\w-]{20,})/i);
+  if (m) return { channelId: m[1] };
+  if (/@[\w.-]+/.test(v) || /youtube\.com\/(c|user)\//i.test(v)) {
+    return { handleBlocked: true };
+  }
+  return {};
+}
+
+// Inline form for adding a source. All fields show at once, labeled by which
+// kind they apply to — no conditional rendering, so there's no hidden-field state
+// to get wrong. Submit validates per-kind and resolves YouTube channel input.
+function AddSourceForm({ onClose }: { onClose: () => void }) {
+  const add = useAddSource();
+  const [name, setName] = useState("");
+  const [kind, setKind] = useState<string>("rss");
+  const [group, setGroup] = useState("");
+  const [url, setUrl] = useState("");
+  const [channelId, setChannelId] = useState("");
+  const [linkPattern, setLinkPattern] = useState("");
+  const [limit, setLimit] = useState("8");
+  const [onDemand, setOnDemand] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  function submit() {
+    setError(null);
+    if (!name.trim()) {
+      setError("Name is required.");
+      return;
+    }
+
+    const payload: {
+      name: string;
+      kind: string;
+      group?: string;
+      url?: string;
+      channel_id?: string;
+      article_link_pattern?: string;
+      limit?: number;
+      on_demand?: boolean;
+    } = {
+      name: name.trim(),
+      kind,
+      limit: Number(limit) || 8,
+      on_demand: onDemand,
+    };
+    if (group.trim()) payload.group = group.trim();
+
+    if (kind === "rss" || kind === "atom") {
+      if (!url.trim()) {
+        setError("RSS/Atom feeds need a URL.");
+        return;
+      }
+      payload.url = url.trim();
+    } else if (kind === "youtube") {
+      // Accept a raw channel id or a channel URL from either field; block @handles.
+      const fromChannel = channelId.trim() ? parseYouTubeChannelId(channelId) : {};
+      const fromUrl = url.trim() ? parseYouTubeChannelId(url) : {};
+      if (fromChannel.handleBlocked || fromUrl.handleBlocked) {
+        setError(
+          "@handles aren't supported — paste the channel ID (starts with UC) or a youtube.com/channel/UC… URL.",
+        );
+        return;
+      }
+      const cid = fromChannel.channelId || fromUrl.channelId;
+      if (!cid) {
+        setError(
+          "Enter a YouTube channel ID (starts with UC) or a youtube.com/channel/UC… URL.",
+        );
+        return;
+      }
+      payload.channel_id = cid;
+      payload.url = `https://www.youtube.com/feeds/videos.xml?channel_id=${cid}`;
+    } else if (kind === "html_scrape") {
+      if (!url.trim() || !linkPattern.trim()) {
+        setError("Scrape sources need both a URL and a link pattern.");
+        return;
+      }
+      payload.url = url.trim();
+      payload.article_link_pattern = linkPattern.trim();
+    }
+
+    add.mutate(payload, {
+      onSuccess: () => {
+        pushToast({ title: "Source added", description: name.trim() });
+        onClose();
+      },
+      onError: (err) => setError(String(err)),
+    });
+  }
+
+  return (
+    <div className="rounded-md border p-4 space-y-4 bg-muted/20">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div className="space-y-1.5">
+          <Label htmlFor="src-name">Name</Label>
+          <Input
+            id="src-name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="e.g. Latent Space"
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="src-kind">Kind</Label>
+          <Select value={kind} onValueChange={setKind}>
+            <SelectTrigger id="src-kind">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {SOURCE_KINDS.map((k) => (
+                <SelectItem key={k} value={k}>
+                  {k}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="src-url">URL (RSS / Atom / scrape — or a YouTube channel URL)</Label>
+          <Input
+            id="src-url"
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            placeholder="https://…/feed"
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="src-channel">Channel ID (YouTube only — starts with UC)</Label>
+          <Input
+            id="src-channel"
+            value={channelId}
+            onChange={(e) => setChannelId(e.target.value)}
+            placeholder="UCxxxxxxxxxxxxxxxxxxxxxx"
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="src-pattern">Link pattern (html_scrape only — e.g. /p/)</Label>
+          <Input
+            id="src-pattern"
+            value={linkPattern}
+            onChange={(e) => setLinkPattern(e.target.value)}
+            placeholder="/p/"
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="src-group">Group (optional)</Label>
+          <Input
+            id="src-group"
+            value={group}
+            onChange={(e) => setGroup(e.target.value)}
+            placeholder="substack, newsletter_blog, youtube…"
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="src-limit">Limit</Label>
+          <Input
+            id="src-limit"
+            type="number"
+            min={1}
+            value={limit}
+            onChange={(e) => setLimit(e.target.value)}
+          />
+        </div>
+        <div className="flex items-center gap-2 pt-6">
+          <Switch
+            id="src-ondemand"
+            checked={onDemand}
+            onCheckedChange={setOnDemand}
+          />
+          <Label htmlFor="src-ondemand" className="font-normal">
+            On-demand only
+          </Label>
+        </div>
+      </div>
+
+      {error && <p className="text-sm text-destructive">{error}</p>}
+
+      <div className="flex items-center justify-end gap-2">
+        <Button variant="ghost" size="sm" onClick={onClose}>
+          Cancel
+        </Button>
+        <Button size="sm" onClick={submit} disabled={add.isPending}>
+          {add.isPending ? "Adding…" : "Add Source"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 // SourcesPage — table of every configured source with health status, toggle, and
 // per-source or bulk test actions. Mutations hit the Python dashboard API and
 // invalidate the "sources" query key so the table refreshes automatically.
@@ -91,6 +301,8 @@ export default function SourcesPage() {
 
   // Local flag prevents button spam while the bulk test is in flight.
   const [testingAll, setTestingAll] = useState(false);
+  // Toggles the inline Add Source form below the header.
+  const [showAdd, setShowAdd] = useState(false);
 
   // Kick the bulk health check and summarize results in a toast.
   function handleTestAll() {
@@ -186,15 +398,23 @@ export default function SourcesPage() {
             {sources.length} configured · {enabledCount} enabled
           </p>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={handleTestAll}
-          disabled={testingAll}
-        >
-          {testingAll ? "Checking…" : "Test All Sources"}
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleTestAll}
+            disabled={testingAll}
+          >
+            {testingAll ? "Checking…" : "Test All Sources"}
+          </Button>
+          <Button size="sm" onClick={() => setShowAdd((v) => !v)}>
+            {showAdd ? "Close" : "Add Source"}
+          </Button>
+        </div>
       </div>
+
+      {/* Inline Add Source form, toggled from the header. */}
+      {showAdd && <AddSourceForm onClose={() => setShowAdd(false)} />}
 
       {/* Sources table — one row per source. */}
       <div className="overflow-x-auto rounded-md border">
