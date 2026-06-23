@@ -1336,7 +1336,9 @@ def _base_score_card(
     )
     penalty_scale = _trust_penalty_scale(scoring_rubric)
     trust_penalty = round(trust_deficit * penalty_scale)
-    score_before_caps = max(0, min(100, round(value_score) - trust_penalty))
+    # Additive bonus for high-signal source types (e.g. curated YouTube channels).
+    source_bonus, source_bonus_reason = _source_bonus(article, scoring_rubric)
+    score_before_caps = max(0, min(100, round(value_score) + source_bonus - trust_penalty))
     breakdown.append(_score_line(
         "Trust penalty",
         -trust_penalty,
@@ -1347,6 +1349,8 @@ def _base_score_card(
             f"source credibility {trust_profile['deficits']['source_credibility_deficit']}/100."
         ),
     ))
+    if source_bonus:
+        breakdown.append(_score_line("Source bonus", source_bonus, source_bonus_reason))
 
     final_score = score_before_caps
     cap = _hard_cap(article, draft, trust_profile, scoring_rubric)
@@ -1577,6 +1581,11 @@ def _source_tier(article: Article) -> tuple[int, str]:
     combined = f"{source} {host}"
     if not source and not host:
         return 8, "No attributable source"
+    # Curated YouTube channels are editorial picks, not random blogs. Treat them
+    # as a trusted tier (no credibility penalty) before the generic youtube
+    # token match below would otherwise drop them to Tier 6.
+    if article.raw.get("source_type") == "youtube":
+        return 2, f"Tier 2 curated YouTube source: {article.source or host}"
     if source in {"openai", "anthropic", "google", "google deepmind", "microsoft", "nvidia", "meta", "aws"}:
         return 2, f"Tier 1-2 source: {article.source or host}"
     if any(token in combined for token in (
@@ -1599,6 +1608,21 @@ def _source_tier(article: Article) -> tuple[int, str]:
     if source in {"unknown", "test", "sample"}:
         return 7, f"Tier 7 source: {article.source or host}"
     return 5, f"Tier 5 source: {article.source or host}"
+
+
+def _source_bonus(article: Article, scoring_rubric: dict[str, Any]) -> tuple[int, str]:
+    # Look up an additive bonus for this article's source_type from the rubric
+    # (operator-tunable in agent_brain.toml), defaulting to the built-in table.
+    bonuses = dict(DEFAULT_SCORING_RUBRIC.get("source_bonuses", {}))
+    bonuses.update(dict(scoring_rubric.get("source_bonuses", {})))
+    source_type = str(article.raw.get("source_type", ""))
+    try:
+        bonus = int(bonuses.get(source_type, 0))
+    except (TypeError, ValueError):
+        bonus = 0
+    if bonus:
+        return bonus, f"Curated {source_type} source bonus."
+    return 0, ""
 
 
 def _source_credibility_deficit(source_tier: int) -> int:

@@ -116,6 +116,9 @@ export const api = {
     kind: string;
     group?: string;
     url?: string;
+    channel_id?: string;
+    path?: string;
+    article_link_pattern?: string;
     limit?: number;
     on_demand?: boolean;
   }) =>

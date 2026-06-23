@@ -292,6 +292,11 @@ unsupported_opinion_prediction = 50
 minor_product_launch = 55
 duplicate_or_stale_repeat = 40
 
+[scoring.source_bonuses]
+# Additive points by source_type. Curated YouTube channels are high-signal,
+# so reward them instead of penalizing video. Raise to surface more video.
+youtube = 8
+
 [scoring.priority_match_bands]
 # Points for how directly an article matches your priority groups (0-25).
 # These three band tables ARE consumed by the V2 score (_base_score_card).

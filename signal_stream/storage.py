@@ -1167,14 +1167,32 @@ class SignalStorage:
         return _row_to_source_record(row) if row else None
 
     def add_source(self, record) -> None:
-        """Insert a new manually-created source. Silently ignores duplicates."""
+        """Insert a manually-created source.
+
+        If a source with this id was previously soft-deleted (Remove in the UI),
+        revive it by clearing deleted_at and refreshing its fields — so re-adding
+        a removed source brings it back instead of silently no-op'ing.
+        """
         with self.connect() as conn:
             conn.execute("""
-                insert or ignore into sources
+                insert into sources
                     (id, name, kind, group_name, url, path, channel_id,
                      article_link_pattern, limit_count, enabled, on_demand,
                      origin, created_at, updated_at)
                 values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                on conflict(id) do update set
+                    name = excluded.name,
+                    kind = excluded.kind,
+                    group_name = excluded.group_name,
+                    url = excluded.url,
+                    path = excluded.path,
+                    channel_id = excluded.channel_id,
+                    article_link_pattern = excluded.article_link_pattern,
+                    limit_count = excluded.limit_count,
+                    enabled = excluded.enabled,
+                    on_demand = excluded.on_demand,
+                    updated_at = excluded.updated_at,
+                    deleted_at = null
             """, (
                 record.id, record.name, record.kind, record.group_name,
                 record.url, record.path, record.channel_id,
