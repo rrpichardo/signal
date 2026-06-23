@@ -8,7 +8,9 @@ version = "0.1.0"
 description = "Local-first agentic strategic intelligence prototype for Signal Stream."
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+# Backend is otherwise stdlib-only. The sole exception is the YouTube
+# transcript fetcher, which needs youtube-transcript-api to pull captions.
+dependencies = ["youtube-transcript-api>=1.2"]
 
 [project.scripts]
 signal-stream = "signal_stream.cli:main"

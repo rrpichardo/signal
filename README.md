@@ -27,7 +27,7 @@ It's built around one question, applied to every article: *should you rely on th
 | **Runs** | Locally, on demand — no scheduler or cloud account required |
 | **Brain** | Groq-hosted models for agent judgment and article review |
 | **Memory** | Local SQLite database, so repeats get dropped automatically |
-| **Backend** | Python 3.11+, **zero pip dependencies** (standard library only) |
+| **Backend** | Python 3.11+, standard library only except `youtube-transcript-api` (the sole pip dependency, used to pull YouTube captions) |
 | **Dashboard** | React + Vite + shadcn/ui, served by the Python app (with a no-build fallback) |
 | **You configure** | Sources, priorities, scoring weights, prompts, and display — from the dashboard or a single config file |
 

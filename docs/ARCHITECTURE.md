@@ -30,7 +30,7 @@ flowchart LR
 
 - Hosted API support is **DONE** through Groq and `BrainClient`.
 - The active model is `meta-llama/llama-4-scout-17b-16e-instruct`.
-- The backend remains stdlib-only.
+- The backend remains stdlib-only except for `youtube-transcript-api`, used by the YouTube transcript fetcher.
 - The active product path is `python3 -m signal_stream agent run --config configs/ai_tech.toml`.
 - The React dashboard is the primary UI, with the Python inline dashboard as fallback.
 

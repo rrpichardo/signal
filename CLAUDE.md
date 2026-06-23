@@ -6,7 +6,7 @@ Originated as a Design for AI class project at Tepper. Conceptually linked to a 
 
 ## Stack
 
-- **Language:** Python 3.11+ (stdlib only for the backend; no new Python deps)
+- **Language:** Python 3.11+ (stdlib only for the backend, with one exception: `youtube-transcript-api` for the YouTube transcript fetcher)
 - **Agent brain:** Groq cloud API, model `meta-llama/llama-4-scout-17b-16e-instruct`
 - **Auth:** `GROQ_API_KEY` environment variable; `.env` is not auto-loaded
 - **Memory:** SQLite at `../.signal_stream/signal_stream.db`
@@ -89,7 +89,8 @@ Groq reviews only the highest-scoring candidates, capped by `analyst_review_limi
 ## Setup
 
 ```bash
-# Backend has zero pip dependencies. Export the key before running.
+# Backend has a single pip dependency. Install it, then export the key.
+pip install -e .   # pulls youtube-transcript-api
 export GROQ_API_KEY=<your-key>
 
 # Build the frontend once.
@@ -142,7 +143,7 @@ Set in `configs/agent_brain.toml` or via the dashboard Settings tab:
 ## Constraints And Gotchas
 
 - `GROQ_API_KEY` must be exported before `agent run`. The app does not auto-load `.env`.
-- Backend code must stay stdlib-only unless the no-deps rule is explicitly changed.
+- Backend code stays stdlib-only except for `youtube-transcript-api` (the YouTube transcript fetcher). Do not add further dependencies unless that exception is explicitly widened.
 - The dashboard uses a PID file to keep one instance active.
 - Edit prompts and behavior in `configs/agent_brain.toml`; Python prompt fallbacks are not the operator-facing source of truth.
 - When adding an agent capability, update the Python dashboard API, React UI, and TypeScript types together.
